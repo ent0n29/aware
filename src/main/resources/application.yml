@@ -16,7 +16,7 @@ management:
         include: health,info,metrics
 
 hft:
-  mode: PAPER
+  mode: LIVE
   risk:
     kill-switch: false
     max-order-notional-usd: 0
@@ -33,13 +33,13 @@ hft:
     chain-id: 137
     use-server-time: true
     market-ws-enabled: false
-    market-asset-ids: []
+    market-asset-ids: [ ]
     auth:
-      private-key: ${POLYMARKET_PRIVATE_KEY:}
-      signature-type: 0
-      funder-address: ${POLYMARKET_FUNDER_ADDRESS:}
-      api-key: ${POLYMARKET_API_KEY:}
-      api-secret: ${POLYMARKET_API_SECRET:}
-      api-passphrase: ${POLYMARKET_API_PASSPHRASE:}
+      private-key: "REDACTED_POLYMARKET_PRIVATE_KEY"
+      signature-type: 1
+      funder-address: "0xd3d7ed6e3005dd6401be16fb6a4111d1b7fb2d19"
+      api-key: "REDACTED_POLYMARKET_API_KEY"
+      api-secret: "REDACTED_POLYMARKET_API_SECRET"
+      api-passphrase: "REDACTED_POLYMARKET_API_PASSPHRASE"
       nonce: 0
       auto-create-or-derive-api-creds: false

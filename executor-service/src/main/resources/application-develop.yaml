@@ -3,5 +3,14 @@ hft:
   events:
     enabled: true
   polymarket:
+    # Auth credentials - fill these in with your values
     auth:
+      # Your Ethereum private key (0x + 64 hex chars)
+      private-key: "REDACTED_POLYMARKET_PRIVATE_KEY"
       auto-create-or-derive-api-creds: true
+
+# Logging
+logging:
+  level:
+    com.polybot.hft: DEBUG
+

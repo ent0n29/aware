@@ -1343,16 +1343,20 @@ public class PaperExchangeSimulator {
     }
 
     if (trade.ts != null && order.createdAt != null) {
-      if (isTradeTapeDataApiSource()) {
+      // When tradeTapeUseTradeTimestamp=false, treat tape trades as "happening now" for simulation.
+      // This avoids skipping historical trades when we're processing a batch of tape data.
+      Instant effectiveTradeTs = Boolean.FALSE.equals(sim.tradeTapeUseTradeTimestamp()) ? clock.instant() : trade.ts;
+      if (isTradeTapeDataApiSource() && Boolean.TRUE.equals(sim.tradeTapeUseTradeTimestamp())) {
         // Data API trade timestamps are seconds-resolution. Treat the print as occurring within [ts, ts+1).
         // Only skip if the whole second ended before the order existed.
-        if (trade.ts.plusSeconds(1).isBefore(order.createdAt)) {
+        if (effectiveTradeTs.plusSeconds(1).isBefore(order.createdAt)) {
           tradeTapePreOrderSkips.incrementAndGet();
           return tradeRemaining;
         }
       } else {
         // WS timestamps are real-time; do not extend the window past order creation.
-        if (trade.ts.isBefore(order.createdAt)) {
+        // When tradeTapeUseTradeTimestamp=false, effectiveTradeTs is clock.instant() so this check passes.
+        if (effectiveTradeTs.isBefore(order.createdAt)) {
           tradeTapePreOrderSkips.incrementAndGet();
           return tradeRemaining;
         }

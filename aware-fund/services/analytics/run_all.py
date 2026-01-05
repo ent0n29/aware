@@ -304,6 +304,35 @@ def run_edge_persistence(ch_client) -> dict:
         return {'status': 'error', 'error': str(e)}
 
 
+def run_market_classification(ch_client) -> dict:
+    """Run market category classification"""
+    logger.info("Running market classification...")
+    start = time.time()
+
+    try:
+        from market_classification_job import MarketClassificationJob
+
+        job = MarketClassificationJob(ch_client)
+        result = job.run(full_reclassify=False)  # Only classify new markets
+
+        elapsed = time.time() - start
+        classified = result.get('markets_classified', 0)
+        logger.info(f"Classified {classified} markets in {elapsed:.1f}s")
+
+        return {
+            'status': 'success',
+            'markets_classified': classified,
+            'category_distribution': result.get('category_distribution', {}),
+            'elapsed_seconds': elapsed
+        }
+
+    except Exception as e:
+        logger.error(f"Market classification failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'status': 'error', 'error': str(e)}
+
+
 def run_resolution_tracking(ch_client) -> dict:
     """Track market resolutions from Gamma API"""
     logger.info("Running resolution tracking...")
@@ -403,7 +432,12 @@ def run_all_jobs(ch_client) -> dict:
     start = time.time()
     results = {}
 
-    # 0. Resolution Tracking (must run before P&L)
+    # 0. Market Classification (must run before PSI index building)
+    # Classifies market slugs into categories (CRYPTO, POLITICS, SPORTS, etc.)
+    # Required for PSI-POLITICS, PSI-SPORTS, PSI-CRYPTO sectorial indexes
+    results['market_classification'] = run_market_classification(ch_client)
+
+    # 1. Resolution Tracking (must run before P&L)
     results['resolution_tracking'] = run_resolution_tracking(ch_client)
 
     # 1. P&L Calculation (populates aware_trader_pnl table)

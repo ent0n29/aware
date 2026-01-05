@@ -59,9 +59,9 @@ public class GabagoolMarketDiscovery {
     }
 
   /**
-   * Refresh market discovery every 30 seconds.
+   * Refresh market discovery every 10 seconds (reduced from 30s to catch fast-starting markets).
    */
-  @Scheduled(fixedDelay = 30_000, initialDelay = 5_000)
+  @Scheduled(fixedDelay = 10_000, initialDelay = 5_000)
   public void discoverMarkets() {
         if (!properties.strategy().gabagool().enabled()) {
             return;
@@ -277,8 +277,8 @@ public class GabagoolMarketDiscovery {
         }
         Duration duration = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(15) : Duration.ofHours(1);
         Instant startTime = market.endTime().minus(duration);
-        // Pre-warm a little before the market "start" so WS TOB is hot at the first decision tick.
-        Duration prewarm = "updown-15m".equals(market.marketType()) ? Duration.ofSeconds(90) : Duration.ofMinutes(3);
+        // Pre-warm well before the market "start" to catch early activity (widened to match gab's timing).
+        Duration prewarm = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(5) : Duration.ofMinutes(10);
         return !now.isBefore(startTime.minus(prewarm));
     }
 

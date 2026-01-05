@@ -459,12 +459,12 @@ public class GabagoolDirectionalEngine {
 
         // Index = ticks above best bid (0..s-1).
         // Calibrated to match gabagool22's actual behavior: p50_above_bid = 0 (quotes AT the bid).
-        // Previous weights had 50%+ mass on +1 tick, causing our p50 = 0.01. Fixed to 85% at bid.
+        // Data shows sim avg price 0.512 vs gab 0.506 - we're 1 cent too high. Increased at-bid weight to 95%.
         double[] weights = switch (s) {
-            case 2 -> new double[]{0.85, 0.15};
-            case 3 -> new double[]{0.80, 0.15, 0.05};
-            case 4 -> new double[]{0.80, 0.12, 0.05, 0.03};
-            default -> new double[]{0.80, 0.12, 0.05, 0.02, 0.01};
+            case 2 -> new double[]{0.95, 0.05};
+            case 3 -> new double[]{0.90, 0.08, 0.02};
+            case 4 -> new double[]{0.90, 0.06, 0.03, 0.01};
+            default -> new double[]{0.90, 0.05, 0.03, 0.01, 0.01};
         };
 
         int sampled = sampleFromWeights(s, r, weights);
@@ -990,7 +990,8 @@ public class GabagoolDirectionalEngine {
 
     private boolean isStale(TopOfBook tob) {
         if (tob == null || tob.updatedAt() == null) return true;
-        return Duration.between(tob.updatedAt(), clock.instant()).toMillis() > 5_000;
+        // Widened from 5s to 15s to allow more tolerance during WS reconnects
+        return Duration.between(tob.updatedAt(), clock.instant()).toMillis() > 15_000;
     }
 
     private void logStartupConfig(GabagoolConfig cfg) {

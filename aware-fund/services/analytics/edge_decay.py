@@ -16,7 +16,7 @@ Detection Methods:
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 from enum import Enum
 import math
 
@@ -26,6 +26,211 @@ except ImportError:
     from security import sanitize_username
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Statistical Significance Testing
+# =============================================================================
+
+def calculate_z_score(p1: float, p2: float, n1: int, n2: int) -> float:
+    """
+    Calculate Z-score for comparing two proportions (e.g., win rates).
+
+    Uses the pooled proportion method for two-proportion z-test.
+
+    Args:
+        p1: First proportion (historical win rate)
+        p2: Second proportion (recent win rate)
+        n1: Sample size for first proportion
+        n2: Sample size for second proportion
+
+    Returns:
+        Z-score (positive = decline, negative = improvement)
+    """
+    if n1 == 0 or n2 == 0:
+        return 0.0
+
+    # Pooled proportion
+    p_pool = (p1 * n1 + p2 * n2) / (n1 + n2)
+
+    # Standard error
+    se = math.sqrt(p_pool * (1 - p_pool) * (1/n1 + 1/n2))
+
+    if se == 0:
+        return 0.0
+
+    # Z-score (p1 - p2) / SE
+    # Positive means p1 > p2 (historical > recent = decline)
+    return (p1 - p2) / se
+
+
+def calculate_t_statistic(
+    mean1: float, mean2: float,
+    std1: float, std2: float,
+    n1: int, n2: int
+) -> float:
+    """
+    Calculate Welch's t-statistic for comparing two means.
+
+    Welch's t-test does not assume equal variances.
+
+    Args:
+        mean1: Mean of first sample (historical)
+        mean2: Mean of second sample (recent)
+        std1: Standard deviation of first sample
+        std2: Standard deviation of second sample
+        n1: Sample size for first
+        n2: Sample size for second
+
+    Returns:
+        t-statistic (positive = decline)
+    """
+    if n1 <= 1 or n2 <= 1:
+        return 0.0
+
+    # Pooled standard error using Welch's method
+    var1 = std1 ** 2 / n1
+    var2 = std2 ** 2 / n2
+    se = math.sqrt(var1 + var2)
+
+    if se == 0:
+        return 0.0
+
+    return (mean1 - mean2) / se
+
+
+def z_to_pvalue(z: float, two_tailed: bool = True) -> float:
+    """
+    Convert Z-score to p-value using standard normal approximation.
+
+    Uses the error function approximation for the normal CDF.
+
+    Args:
+        z: Z-score
+        two_tailed: If True, return two-tailed p-value
+
+    Returns:
+        p-value
+    """
+    # Standard normal CDF approximation using error function
+    # CDF(z) = 0.5 * (1 + erf(z / sqrt(2)))
+
+    def erf_approx(x: float) -> float:
+        """Approximation of error function"""
+        # Constants for Horner form approximation
+        a1 = 0.254829592
+        a2 = -0.284496736
+        a3 = 1.421413741
+        a4 = -1.453152027
+        a5 = 1.061405429
+        p = 0.3275911
+
+        sign = 1 if x >= 0 else -1
+        x = abs(x)
+
+        t = 1.0 / (1.0 + p * x)
+        y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-x * x)
+
+        return sign * y
+
+    # Calculate CDF
+    cdf = 0.5 * (1 + erf_approx(abs(z) / math.sqrt(2)))
+
+    # p-value is the tail probability
+    p = 1 - cdf
+
+    if two_tailed:
+        p = 2 * p
+
+    return min(1.0, max(0.0, p))
+
+
+def t_to_pvalue(t: float, df: int, two_tailed: bool = True) -> float:
+    """
+    Approximate p-value from t-statistic using normal approximation.
+
+    For large degrees of freedom, t-distribution approaches normal.
+    For smaller df, this is an approximation.
+
+    Args:
+        t: t-statistic
+        df: degrees of freedom
+        two_tailed: If True, return two-tailed p-value
+
+    Returns:
+        Approximate p-value
+    """
+    if df <= 0:
+        return 1.0
+
+    # For df > 30, normal approximation is reasonable
+    # For smaller df, we adjust the z-score slightly
+    if df > 30:
+        z = t
+    else:
+        # Simple adjustment for smaller samples
+        z = t * math.sqrt(df / (df - 2)) if df > 2 else t
+
+    return z_to_pvalue(z, two_tailed)
+
+
+def calculate_welch_df(std1: float, std2: float, n1: int, n2: int) -> int:
+    """
+    Calculate degrees of freedom for Welch's t-test.
+
+    Args:
+        std1, std2: Standard deviations
+        n1, n2: Sample sizes
+
+    Returns:
+        Degrees of freedom (rounded to int)
+    """
+    if n1 <= 1 or n2 <= 1:
+        return 1
+
+    var1 = std1 ** 2 / n1
+    var2 = std2 ** 2 / n2
+
+    numerator = (var1 + var2) ** 2
+    denominator = (var1 ** 2 / (n1 - 1)) + (var2 ** 2 / (n2 - 1))
+
+    if denominator == 0:
+        return max(n1 + n2 - 2, 1)
+
+    df = numerator / denominator
+    return max(1, int(df))
+
+
+def bootstrap_confidence_interval(
+    metric_diff: float,
+    n_samples: int = 100,
+    confidence: float = 0.95
+) -> Tuple[float, float]:
+    """
+    Estimate confidence interval for metric difference using simple approximation.
+
+    For production, you'd want actual bootstrap resampling with the data.
+    This provides a rough estimate based on normal theory.
+
+    Args:
+        metric_diff: Observed difference in metric
+        n_samples: Effective sample size
+        confidence: Confidence level (e.g., 0.95)
+
+    Returns:
+        Tuple of (lower, upper) confidence interval bounds
+    """
+    # Z-score for confidence level
+    z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+    z = z_scores.get(confidence, 1.96)
+
+    # Approximate standard error (using rule of thumb)
+    se = abs(metric_diff) / math.sqrt(n_samples) if n_samples > 0 else 0
+
+    lower = metric_diff - z * se
+    upper = metric_diff + z * se
+
+    return (lower, upper)
 
 
 class DecaySignal(Enum):
@@ -299,9 +504,19 @@ class EdgeDecayDetector:
             return None
 
     def _check_sharpe_decay(self, historical: dict, recent: dict) -> Optional[dict]:
-        """Check for Sharpe ratio decay"""
+        """
+        Check for Sharpe ratio decay with statistical significance.
+
+        Uses Welch's t-test to compare return/risk ratios between periods.
+        """
         hist_sharpe = historical.get('sharpe_ratio', 0)
         recent_sharpe = recent.get('sharpe_ratio', 0)
+        hist_avg_return = historical.get('avg_return', 0)
+        recent_avg_return = recent.get('avg_return', 0)
+        hist_std = historical.get('return_std', 1)
+        recent_std = recent.get('return_std', 1)
+        hist_n = historical.get('trade_count', 0)
+        recent_n = recent.get('trade_count', 0)
 
         if hist_sharpe <= 0:
             return None
@@ -311,7 +526,37 @@ class EdgeDecayDetector:
         if pct_decline < self.config.early_warning_decline_pct:
             return None
 
-        decay_score = min(100, pct_decline * 100)
+        # Statistical significance test using Welch's t-test on returns
+        t_stat = calculate_t_statistic(
+            hist_avg_return, recent_avg_return,
+            hist_std, recent_std,
+            hist_n, recent_n
+        )
+        df = calculate_welch_df(hist_std, recent_std, hist_n, recent_n)
+        p_value = t_to_pvalue(t_stat, df, two_tailed=False)  # One-tailed: testing for decline
+
+        # Calculate confidence based on statistical significance
+        # Lower p-value = higher confidence in the decline being real
+        if p_value < 0.01:
+            stat_confidence = 0.95
+        elif p_value < 0.05:
+            stat_confidence = 0.85
+        elif p_value < 0.10:
+            stat_confidence = 0.70
+        else:
+            stat_confidence = 0.50
+
+        # Sample size factor (more data = higher confidence)
+        sample_factor = min(1.0, (hist_n + recent_n) / 100)
+
+        # Combined confidence
+        confidence = stat_confidence * sample_factor
+
+        # Only alert if statistically significant or very large decline
+        if p_value > self.config.significance_level and pct_decline < self.config.moderate_decline_pct:
+            return None
+
+        decay_score = min(100, pct_decline * 100 * confidence)
 
         return {
             'type': DecayType.SHARPE_RATIO,
@@ -319,15 +564,25 @@ class EdgeDecayDetector:
             'recent': recent_sharpe,
             'pct_decline': pct_decline,
             'decay_score': decay_score,
-            'confidence': 0.85,
-            'p_value': 0.05,
-            'message': f"Sharpe ratio declined {pct_decline*100:.1f}% from {hist_sharpe:.2f} to {recent_sharpe:.2f}"
+            'confidence': confidence,
+            'p_value': p_value,
+            't_statistic': t_stat,
+            'degrees_freedom': df,
+            'is_significant': p_value < self.config.significance_level,
+            'message': f"Sharpe ratio declined {pct_decline*100:.1f}% from {hist_sharpe:.2f} to {recent_sharpe:.2f} (p={p_value:.3f})"
         }
 
     def _check_winrate_decay(self, historical: dict, recent: dict) -> Optional[dict]:
-        """Check for win rate decay"""
+        """
+        Check for win rate decay with statistical significance.
+
+        Uses two-proportion z-test to compare win rates between periods.
+        This is the appropriate test for comparing proportions/percentages.
+        """
         hist_wr = historical.get('win_rate', 0)
         recent_wr = recent.get('win_rate', 0)
+        hist_n = historical.get('trade_count', 0)
+        recent_n = recent.get('trade_count', 0)
 
         if hist_wr <= 0.5:  # Already losing
             return None
@@ -337,7 +592,39 @@ class EdgeDecayDetector:
         if pct_decline < self.config.early_warning_decline_pct:
             return None
 
-        decay_score = min(100, pct_decline * 100 * 0.8)  # Win rate slightly less weighted
+        # Two-proportion z-test for win rates
+        z_score = calculate_z_score(hist_wr, recent_wr, hist_n, recent_n)
+        p_value = z_to_pvalue(z_score, two_tailed=False)  # One-tailed: testing for decline
+
+        # Calculate confidence based on statistical significance
+        if p_value < 0.01:
+            stat_confidence = 0.95
+        elif p_value < 0.05:
+            stat_confidence = 0.85
+        elif p_value < 0.10:
+            stat_confidence = 0.70
+        else:
+            stat_confidence = 0.50
+
+        # Sample size factor
+        sample_factor = min(1.0, (hist_n + recent_n) / 100)
+
+        # Combined confidence
+        confidence = stat_confidence * sample_factor
+
+        # Only alert if statistically significant or very large decline
+        if p_value > self.config.significance_level and pct_decline < self.config.moderate_decline_pct:
+            return None
+
+        # Win rate slightly less weighted (0.8 factor)
+        decay_score = min(100, pct_decline * 100 * 0.8 * confidence)
+
+        # Calculate 95% confidence interval for the difference
+        ci_lower, ci_upper = bootstrap_confidence_interval(
+            hist_wr - recent_wr,
+            hist_n + recent_n,
+            confidence=0.95
+        )
 
         return {
             'type': DecayType.WIN_RATE,
@@ -345,15 +632,26 @@ class EdgeDecayDetector:
             'recent': recent_wr,
             'pct_decline': pct_decline,
             'decay_score': decay_score,
-            'confidence': 0.80,
-            'p_value': 0.10,
-            'message': f"Win rate declined from {hist_wr*100:.1f}% to {recent_wr*100:.1f}%"
+            'confidence': confidence,
+            'p_value': p_value,
+            'z_score': z_score,
+            'is_significant': p_value < self.config.significance_level,
+            'ci_95': (ci_lower, ci_upper),
+            'message': f"Win rate declined from {hist_wr*100:.1f}% to {recent_wr*100:.1f}% (p={p_value:.3f}, z={z_score:.2f})"
         }
 
     def _check_returns_decay(self, historical: dict, recent: dict) -> Optional[dict]:
-        """Check for returns decay"""
+        """
+        Check for returns decay with statistical significance.
+
+        Uses Welch's t-test to compare mean returns between periods.
+        """
         hist_returns = historical.get('avg_return', 0)
         recent_returns = recent.get('avg_return', 0)
+        hist_std = historical.get('return_std', 1)
+        recent_std = recent.get('return_std', 1)
+        hist_n = historical.get('trade_count', 0)
+        recent_n = recent.get('trade_count', 0)
 
         if hist_returns <= 0:
             return None
@@ -363,7 +661,36 @@ class EdgeDecayDetector:
         if pct_decline < self.config.early_warning_decline_pct:
             return None
 
-        decay_score = min(100, pct_decline * 100)
+        # Welch's t-test for mean returns
+        t_stat = calculate_t_statistic(
+            hist_returns, recent_returns,
+            hist_std, recent_std,
+            hist_n, recent_n
+        )
+        df = calculate_welch_df(hist_std, recent_std, hist_n, recent_n)
+        p_value = t_to_pvalue(t_stat, df, two_tailed=False)
+
+        # Calculate confidence based on statistical significance
+        if p_value < 0.01:
+            stat_confidence = 0.95
+        elif p_value < 0.05:
+            stat_confidence = 0.85
+        elif p_value < 0.10:
+            stat_confidence = 0.70
+        else:
+            stat_confidence = 0.50
+
+        # Sample size factor
+        sample_factor = min(1.0, (hist_n + recent_n) / 100)
+
+        # Combined confidence
+        confidence = stat_confidence * sample_factor
+
+        # Only alert if statistically significant or very large decline
+        if p_value > self.config.significance_level and pct_decline < self.config.moderate_decline_pct:
+            return None
+
+        decay_score = min(100, pct_decline * 100 * confidence)
 
         return {
             'type': DecayType.RETURNS,
@@ -371,15 +698,25 @@ class EdgeDecayDetector:
             'recent': recent_returns,
             'pct_decline': pct_decline,
             'decay_score': decay_score,
-            'confidence': 0.75,
-            'p_value': 0.15,
-            'message': f"Average returns declined {pct_decline*100:.1f}%"
+            'confidence': confidence,
+            'p_value': p_value,
+            't_statistic': t_stat,
+            'degrees_freedom': df,
+            'is_significant': p_value < self.config.significance_level,
+            'message': f"Average returns declined {pct_decline*100:.1f}% (p={p_value:.3f}, t={t_stat:.2f})"
         }
 
     def _check_consistency_decay(self, historical: dict, recent: dict) -> Optional[dict]:
-        """Check for consistency decay (increased volatility)"""
+        """
+        Check for consistency decay (increased volatility) with statistical significance.
+
+        Uses F-test for comparing variances to determine if volatility increase
+        is statistically significant.
+        """
         hist_std = historical.get('return_std', 0)
         recent_std = recent.get('return_std', 0)
+        hist_n = historical.get('trade_count', 0)
+        recent_n = recent.get('trade_count', 0)
 
         if hist_std <= 0:
             return None
@@ -390,17 +727,61 @@ class EdgeDecayDetector:
         if pct_increase < self.config.early_warning_decline_pct:
             return None
 
-        decay_score = min(100, pct_increase * 100 * 0.6)  # Consistency less weighted
+        # F-test for variance comparison
+        # F = s2_larger^2 / s2_smaller^2
+        # For testing if recent variance is significantly GREATER than historical
+        if recent_std > hist_std:
+            f_stat = (recent_std ** 2) / (hist_std ** 2) if hist_std > 0 else 0
+        else:
+            # No increase in variance, skip
+            return None
+
+        # Approximate p-value for F-test using normal approximation
+        # For large samples, ln(F) is approximately normal
+        if f_stat > 0 and hist_n > 2 and recent_n > 2:
+            # Use log-F approximation
+            ln_f = math.log(f_stat)
+            # Variance of ln(F) approximately 2/n1 + 2/n2
+            var_ln_f = 2 / (hist_n - 1) + 2 / (recent_n - 1)
+            z_f = ln_f / math.sqrt(var_ln_f) if var_ln_f > 0 else 0
+            p_value = z_to_pvalue(z_f, two_tailed=False)  # One-tailed: testing for increase
+        else:
+            p_value = 0.5
+
+        # Calculate confidence based on statistical significance
+        if p_value < 0.01:
+            stat_confidence = 0.90
+        elif p_value < 0.05:
+            stat_confidence = 0.80
+        elif p_value < 0.10:
+            stat_confidence = 0.65
+        else:
+            stat_confidence = 0.45
+
+        # Sample size factor
+        sample_factor = min(1.0, (hist_n + recent_n) / 100)
+
+        # Combined confidence
+        confidence = stat_confidence * sample_factor
+
+        # Only alert if statistically significant or very large increase
+        if p_value > self.config.significance_level and pct_increase < self.config.moderate_decline_pct:
+            return None
+
+        # Consistency less weighted (0.6 factor)
+        decay_score = min(100, pct_increase * 100 * 0.6 * confidence)
 
         return {
             'type': DecayType.CONSISTENCY,
             'historical': hist_std,
             'recent': recent_std,
-            'pct_decline': pct_increase,  # Actually an increase
+            'pct_decline': pct_increase,  # Actually an increase in volatility
             'decay_score': decay_score,
-            'confidence': 0.70,
-            'p_value': 0.20,
-            'message': f"Return volatility increased {pct_increase*100:.1f}% (less consistent)"
+            'confidence': confidence,
+            'p_value': p_value,
+            'f_statistic': f_stat,
+            'is_significant': p_value < self.config.significance_level,
+            'message': f"Return volatility increased {pct_increase*100:.1f}% - less consistent (p={p_value:.3f}, F={f_stat:.2f})"
         }
 
     def _determine_signal(self, pct_decline: float) -> DecaySignal:

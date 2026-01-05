@@ -121,10 +121,48 @@ class HiddenAlphaDiscovery:
 
         These are traders with excellent metrics (high Sharpe, good win rate)
         but low volume - they're not on the public leaderboard.
+
+        Enhanced algorithm:
+        1. Find traders with high risk-adjusted returns
+        2. Filter those below visibility threshold
+        3. Score based on quality/visibility ratio
+        4. Consider consistency and edge persistence
         """
         logger.info("Searching for hidden gems...")
 
+        # Enhanced query with more metrics for better gem detection
         query = f"""
+        WITH
+        -- Get comprehensive trader metrics
+        trader_metrics AS (
+            SELECT
+                username,
+                total_score,
+                sharpe_ratio,
+                win_rate,
+                total_volume_usd,
+                total_trades,
+                days_active,
+                total_pnl,
+                strategy_type,
+                unique_markets
+            FROM polybot.aware_psi_eligible_traders
+            WHERE
+                sharpe_ratio >= {self.config.min_sharpe_for_gem}
+                AND total_volume_usd <= {self.config.max_volume_for_hidden}
+                AND total_trades >= {self.config.min_trades_for_gem}
+                AND username != ''
+        ),
+        -- Calculate percentile ranks for quality metrics
+        ranked AS (
+            SELECT
+                *,
+                percent_rank() OVER (ORDER BY sharpe_ratio) as sharpe_percentile,
+                percent_rank() OVER (ORDER BY win_rate) as winrate_percentile,
+                percent_rank() OVER (ORDER BY total_pnl) as pnl_percentile,
+                percent_rank() OVER (ORDER BY total_volume_usd DESC) as visibility_percentile
+            FROM trader_metrics
+        )
         SELECT
             username,
             total_score,
@@ -134,14 +172,21 @@ class HiddenAlphaDiscovery:
             total_trades,
             days_active,
             total_pnl,
-            strategy_type
-        FROM polybot.aware_psi_eligible_traders
+            strategy_type,
+            unique_markets,
+            sharpe_percentile,
+            winrate_percentile,
+            pnl_percentile,
+            visibility_percentile
+        FROM ranked
         WHERE
-            sharpe_ratio >= {self.config.min_sharpe_for_gem}
-            AND total_volume_usd <= {self.config.max_volume_for_hidden}
-            AND total_trades >= {self.config.min_trades_for_gem}
-            AND username != ''
-        ORDER BY sharpe_ratio DESC
+            -- High quality (top 30% on at least one metric)
+            (sharpe_percentile >= 0.7 OR winrate_percentile >= 0.7 OR pnl_percentile >= 0.7)
+            -- Low visibility (bottom 50% by volume)
+            AND visibility_percentile >= 0.5
+        ORDER BY
+            -- Composite score: quality vs visibility
+            (sharpe_percentile + winrate_percentile + pnl_percentile) / 3 - (1 - visibility_percentile) DESC
         LIMIT {self.config.max_discoveries_per_type}
         """
 
@@ -150,31 +195,56 @@ class HiddenAlphaDiscovery:
             discoveries = []
 
             for row in result.result_rows:
-                # Calculate visibility score (lower = more hidden)
-                volume = row[4]
-                visibility = min(100, (volume / 100000) * 100)  # 0-100 based on volume
-
-                # Calculate discovery score
+                username = row[0]
+                total_score = row[1]
                 sharpe = row[2]
+                win_rate = row[3] or 0
+                volume = row[4]
+                total_trades = row[5]
+                days_active = row[6]
+                total_pnl = row[7]
+                strategy_type = row[8]
+                unique_markets = row[9]
+                sharpe_pct = row[10]
+                winrate_pct = row[11]
+                pnl_pct = row[12]
+                visibility_pct = row[13]
+
+                # Calculate visibility score (lower = more hidden)
+                visibility = min(100, (1 - visibility_pct) * 100)
+
+                # Calculate composite quality score
+                quality_score = (sharpe_pct * 40 + winrate_pct * 30 + pnl_pct * 30)
+
+                # Hidden gem score: high quality + low visibility
                 discovery_score = self._calculate_gem_score(sharpe, visibility)
 
+                # Estimate edge persistence based on consistency
+                trades_per_day = total_trades / max(1, days_active)
+                edge_persistence = min(0.9, 0.5 + (trades_per_day * 0.05) + (win_rate * 0.2))
+
                 trader = HiddenTrader(
-                    username=row[0],
+                    username=username,
                     discovery_type=DiscoveryType.HIDDEN_GEM,
                     discovery_score=discovery_score,
                     visibility_score=visibility,
-                    leaderboard_rank=None,  # Not on leaderboard
-                    total_score=row[1],
+                    leaderboard_rank=None,
+                    total_score=total_score,
                     sharpe_ratio=sharpe,
-                    win_rate=row[3] or 0,
-                    edge_persistence=0.7,  # Default estimate
-                    discovery_reason=f"Sharpe {sharpe:.2f} with only ${volume:,.0f} volume - flying under radar",
+                    win_rate=win_rate,
+                    edge_persistence=edge_persistence,
+                    discovery_reason=f"Sharpe {sharpe:.2f} (top {(1-sharpe_pct)*100:.0f}%) with only ${volume:,.0f} volume - flying under radar",
                     discovered_at=datetime.utcnow(),
                     standout_metrics={
                         'sharpe_ratio': sharpe,
+                        'sharpe_percentile': round(sharpe_pct * 100, 1),
+                        'win_rate': win_rate,
+                        'win_rate_percentile': round(winrate_pct * 100, 1),
                         'volume': volume,
-                        'trades': row[5],
-                        'pnl': row[7],
+                        'trades': total_trades,
+                        'pnl': total_pnl,
+                        'quality_score': round(quality_score, 1),
+                        'unique_markets': unique_markets,
                     }
                 )
                 discoveries.append(trader)
@@ -192,28 +262,89 @@ class HiddenAlphaDiscovery:
 
         These traders have been active for less than 30 days but show
         exceptional metrics - potential future top performers.
+
+        Enhanced algorithm:
+        1. Find traders new to the platform
+        2. Compare their early performance to established traders
+        3. Calculate "acceleration" - rate of improvement
+        4. Score based on early excellence relative to tenure
         """
         logger.info("Searching for rising stars...")
 
+        # Enhanced query with performance acceleration metrics
         query = f"""
+        WITH
+        -- Get recent traders
+        new_traders AS (
+            SELECT
+                username,
+                total_score,
+                sharpe_ratio,
+                win_rate,
+                total_volume_usd,
+                total_trades,
+                days_active,
+                total_pnl,
+                strategy_type,
+                unique_markets
+            FROM polybot.aware_psi_eligible_traders
+            WHERE
+                days_active <= {self.config.max_days_active}
+                AND win_rate >= {self.config.min_win_rate_star}
+                AND sharpe_ratio >= {self.config.min_sharpe_star}
+                AND total_trades >= 10
+                AND username != ''
+        ),
+        -- Calculate performance relative to tenure
+        performance_adjusted AS (
+            SELECT
+                *,
+                total_pnl / GREATEST(days_active, 1) as pnl_per_day,
+                total_trades / GREATEST(days_active, 1) as trades_per_day,
+                total_volume_usd / GREATEST(days_active, 1) as volume_per_day
+            FROM new_traders
+        ),
+        -- Compare to all traders to see how exceptional they are
+        benchmarks AS (
+            SELECT
+                avg(sharpe_ratio) as avg_sharpe,
+                avg(win_rate) as avg_winrate,
+                avg(total_pnl / GREATEST(days_active, 1)) as avg_pnl_per_day
+            FROM polybot.aware_psi_eligible_traders
+            WHERE days_active >= 30  -- Established traders
+        )
         SELECT
-            username,
-            total_score,
-            sharpe_ratio,
-            win_rate,
-            total_volume_usd,
-            total_trades,
-            days_active,
-            total_pnl,
-            strategy_type
-        FROM polybot.aware_psi_eligible_traders
+            pa.username,
+            pa.total_score,
+            pa.sharpe_ratio,
+            pa.win_rate,
+            pa.total_volume_usd,
+            pa.total_trades,
+            pa.days_active,
+            pa.total_pnl,
+            pa.strategy_type,
+            pa.unique_markets,
+            pa.pnl_per_day,
+            pa.trades_per_day,
+            pa.volume_per_day,
+            b.avg_sharpe,
+            b.avg_winrate,
+            b.avg_pnl_per_day,
+            -- Performance multiplier vs benchmarks
+            pa.sharpe_ratio / GREATEST(b.avg_sharpe, 0.1) as sharpe_vs_avg,
+            pa.win_rate / GREATEST(b.avg_winrate, 0.1) as winrate_vs_avg,
+            pa.pnl_per_day / GREATEST(b.avg_pnl_per_day, 1) as pnl_vs_avg
+        FROM performance_adjusted pa
+        CROSS JOIN benchmarks b
         WHERE
-            days_active <= {self.config.max_days_active}
-            AND win_rate >= {self.config.min_win_rate_star}
-            AND sharpe_ratio >= {self.config.min_sharpe_star}
-            AND total_trades >= 10
-            AND username != ''
-        ORDER BY total_score DESC
+            -- Significantly outperforming established traders
+            pa.sharpe_ratio >= b.avg_sharpe * 1.2
+            OR pa.win_rate >= b.avg_winrate * 1.1
+        ORDER BY
+            -- Composite score: outperformance * newness bonus
+            (pa.sharpe_ratio / GREATEST(b.avg_sharpe, 0.1) +
+             pa.win_rate / GREATEST(b.avg_winrate, 0.1)) *
+            (1 + ({self.config.max_days_active} - pa.days_active) / {self.config.max_days_active}) DESC
         LIMIT {self.config.max_discoveries_per_type}
         """
 
@@ -222,32 +353,69 @@ class HiddenAlphaDiscovery:
             discoveries = []
 
             for row in result.result_rows:
-                days_active = row[6]
-                win_rate = row[3] or 0
+                username = row[0]
+                total_score = row[1]
                 sharpe = row[2]
+                win_rate = row[3] or 0
+                volume = row[4]
+                total_trades = row[5]
+                days_active = row[6]
+                total_pnl = row[7]
+                strategy_type = row[8]
+                unique_markets = row[9]
+                pnl_per_day = row[10]
+                trades_per_day = row[11]
+                volume_per_day = row[12]
+                avg_sharpe = row[13]
+                avg_winrate = row[14]
+                avg_pnl_per_day = row[15]
+                sharpe_vs_avg = row[16]
+                winrate_vs_avg = row[17]
+                pnl_vs_avg = row[18]
 
-                # Rising stars get bonus for being new with good stats
+                # Rising stars get bonus for being new with exceptional stats
                 discovery_score = self._calculate_star_score(
                     days_active, win_rate, sharpe
                 )
 
+                # Boost score for outperformance
+                outperformance_bonus = min(20, (sharpe_vs_avg - 1) * 10 + (winrate_vs_avg - 1) * 10)
+                discovery_score = min(100, discovery_score + outperformance_bonus)
+
+                # Calculate acceleration (improvement trajectory)
+                acceleration = 0
+                if sharpe_vs_avg > 1:
+                    acceleration += (sharpe_vs_avg - 1) * 0.5
+                if winrate_vs_avg > 1:
+                    acceleration += (winrate_vs_avg - 1) * 0.5
+                acceleration = min(1.0, acceleration)
+
+                # Edge persistence for rising stars based on consistency
+                edge_persistence = min(0.7, 0.3 + (win_rate * 0.3) + (acceleration * 0.2))
+
                 trader = HiddenTrader(
-                    username=row[0],
+                    username=username,
                     discovery_type=DiscoveryType.RISING_STAR,
                     discovery_score=discovery_score,
-                    visibility_score=30,  # New traders are low visibility
+                    visibility_score=max(10, 40 - days_active),  # Newer = lower visibility
                     leaderboard_rank=None,
-                    total_score=row[1],
+                    total_score=total_score,
                     sharpe_ratio=sharpe,
                     win_rate=win_rate,
-                    edge_persistence=0.5,  # Unknown for new traders
-                    discovery_reason=f"Only {days_active} days active but {win_rate*100:.0f}% win rate",
+                    edge_persistence=edge_persistence,
+                    discovery_reason=f"Only {days_active} days active, {win_rate*100:.0f}% win rate, {sharpe_vs_avg:.1f}x avg Sharpe",
                     discovered_at=datetime.utcnow(),
                     standout_metrics={
                         'days_active': days_active,
                         'win_rate': win_rate,
                         'sharpe_ratio': sharpe,
-                        'trades': row[5],
+                        'trades': total_trades,
+                        'pnl_per_day': round(pnl_per_day, 2),
+                        'trades_per_day': round(trades_per_day, 2),
+                        'sharpe_vs_avg': round(sharpe_vs_avg, 2),
+                        'winrate_vs_avg': round(winrate_vs_avg, 2),
+                        'acceleration': round(acceleration, 2),
+                        'unique_markets': unique_markets,
                     }
                 )
                 discoveries.append(trader)

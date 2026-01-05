@@ -8,6 +8,7 @@ import com.polybot.hft.polymarket.fund.service.FundRegistry;
 import com.polybot.hft.polymarket.fund.service.FundTradeListener;
 import com.polybot.hft.polymarket.fund.service.IndexWeightProvider;
 import com.polybot.hft.strategy.executor.ExecutorApiClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -73,14 +74,16 @@ public class FundConfiguration {
             FundConfig config,
             IndexWeightProvider weightProvider,
             ExecutorApiClient executorApi,
-            JdbcTemplate jdbcTemplate
+            JdbcTemplate jdbcTemplate,
+            MeterRegistry meterRegistry
     ) {
         return new FundPositionMirror(
                 config,
                 weightProvider,
                 executorApi,
                 Clock.systemUTC(),
-                jdbcTemplate
+                jdbcTemplate,
+                meterRegistry
         );
     }
 
@@ -89,15 +92,48 @@ public class FundConfiguration {
             FundConfig config,
             IndexWeightProvider weightProvider,
             FundPositionMirror positionMirror,
-            JdbcTemplate jdbcTemplate
+            JdbcTemplate jdbcTemplate,
+            MeterRegistry meterRegistry
     ) {
         return new FundTradeListener(
                 config,
                 weightProvider,
                 positionMirror,
                 jdbcTemplate,
-                Clock.systemUTC()
+                Clock.systemUTC(),
+                meterRegistry
         );
+    }
+
+    /**
+     * Scheduled task to poll for new trades from PSI index traders.
+     *
+     * Runs every 1000ms to check for new trades.
+     * Note: We create this as a separate bean because @Scheduled annotations
+     * are not processed on beans created via new() in @Bean methods.
+     */
+    @Bean
+    public FundTradePoller fundTradePoller(FundTradeListener tradeListener) {
+        return new FundTradePoller(tradeListener);
+    }
+
+    @Slf4j
+    public static class FundTradePoller {
+        private final FundTradeListener tradeListener;
+
+        public FundTradePoller(FundTradeListener tradeListener) {
+            this.tradeListener = tradeListener;
+            log.info("FundTradePoller initialized - will poll for trades every 1000ms");
+        }
+
+        @Scheduled(fixedRate = 1000)
+        public void pollForTrades() {
+            try {
+                tradeListener.pollForTrades();
+            } catch (Exception e) {
+                log.warn("Error polling for trades: {}", e.getMessage());
+            }
+        }
     }
 
     /**

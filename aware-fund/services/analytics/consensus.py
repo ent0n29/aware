@@ -502,6 +502,145 @@ class ConsensusDetector:
         }
 
 
+def detect_market_consensus(
+    clickhouse_client,
+    market_slug: Optional[str] = None,
+    min_traders: int = 3,
+    min_volume: float = 5000,
+    lookback_hours: int = 48
+) -> dict:
+    """
+    Detect when multiple smart money traders agree on market direction.
+
+    This is the main entry point for consensus detection. It identifies markets
+    where top traders are converging on the same opinion, which can be a
+    strong signal for trading decisions.
+
+    Algorithm:
+    1. Identify smart money traders (based on score threshold)
+    2. Aggregate their positions by market and direction
+    3. Calculate agreement percentage (% of traders on same side)
+    4. Weight by trader quality and volume
+    5. Return consensus signals above threshold
+
+    Args:
+        clickhouse_client: ClickHouse database client
+        market_slug: Optional specific market to analyze (None = all markets)
+        min_traders: Minimum smart money traders for valid signal
+        min_volume: Minimum aggregate volume for valid signal
+        lookback_hours: Time window for analysis
+
+    Returns:
+        Dictionary with consensus analysis results
+    """
+    logger.info(f"Running consensus detection (lookback={lookback_hours}h, min_traders={min_traders})")
+
+    config = ConsensusConfig(
+        min_traders=min_traders,
+        min_volume=min_volume,
+        lookback_hours=lookback_hours
+    )
+    detector = ConsensusDetector(clickhouse_client, config)
+
+    if market_slug:
+        # Single market analysis
+        signal = detector.analyze_market(market_slug)
+        if not signal:
+            return {
+                'market': market_slug,
+                'status': 'INSUFFICIENT_DATA',
+                'message': 'Not enough smart money activity for consensus detection'
+            }
+
+        return {
+            'market': market_slug,
+            'status': 'ANALYZED',
+            'consensus': {
+                'strength': signal.strength.value,
+                'direction': signal.direction.value,
+                'agreement_pct': round(signal.agreement_pct * 100, 1),
+                'confidence': round(signal.confidence_score, 1),
+            },
+            'details': {
+                'traders_analyzed': signal.num_traders_analyzed,
+                'traders_for': signal.num_traders_for,
+                'traders_against': signal.num_traders_against,
+                'volume_for': round(signal.total_volume_for, 2),
+                'volume_against': round(signal.total_volume_against, 2),
+                'signal_quality': round(signal.signal_quality, 1),
+            },
+            'market_context': {
+                'current_price': round(signal.current_price, 3),
+                'implied_shift': round(signal.implied_prob_shift * 100, 1),
+            },
+            'timing': {
+                'first_trade': signal.first_trade_at.isoformat() if signal.first_trade_at else None,
+                'last_trade': signal.last_trade_at.isoformat() if signal.last_trade_at else None,
+            }
+        }
+
+    # Multi-market scan
+    signals = detector.scan_all_markets()
+
+    # Group by consensus strength
+    by_strength = {
+        'VERY_STRONG': [],
+        'STRONG': [],
+        'MODERATE': [],
+        'WEAK': [],
+    }
+
+    for signal in signals:
+        strength = signal.strength.value
+        if strength in by_strength:
+            by_strength[strength].append({
+                'market': signal.market_slug,
+                'title': signal.title,
+                'direction': signal.direction.value,
+                'agreement_pct': round(signal.agreement_pct * 100, 1),
+                'confidence': round(signal.confidence_score, 1),
+                'traders': signal.num_traders_analyzed,
+                'volume': round(signal.total_volume_for + signal.total_volume_against, 0),
+                'implied_shift': round(signal.implied_prob_shift * 100, 1),
+            })
+
+    # Calculate summary statistics
+    strong_signals = [s for s in signals if s.strength in (ConsensusStrength.VERY_STRONG, ConsensusStrength.STRONG)]
+    yes_consensus = [s for s in strong_signals if s.direction == ConsensusDirection.YES]
+    no_consensus = [s for s in strong_signals if s.direction == ConsensusDirection.NO]
+
+    return {
+        'status': 'SCAN_COMPLETE',
+        'scan_params': {
+            'lookback_hours': lookback_hours,
+            'min_traders': min_traders,
+            'min_volume': min_volume,
+        },
+        'summary': {
+            'total_signals': len(signals),
+            'strong_signals': len(strong_signals),
+            'yes_consensus': len(yes_consensus),
+            'no_consensus': len(no_consensus),
+            'average_confidence': round(
+                sum(s.confidence_score for s in signals) / len(signals), 1
+            ) if signals else 0,
+        },
+        'by_strength': by_strength,
+        'top_signals': [
+            {
+                'market': s.market_slug,
+                'title': s.title,
+                'strength': s.strength.value,
+                'direction': s.direction.value,
+                'agreement_pct': round(s.agreement_pct * 100, 1),
+                'confidence': round(s.confidence_score, 1),
+            }
+            for s in sorted(signals, key=lambda x: x.confidence_score, reverse=True)[:10]
+        ],
+        'scan_time': datetime.utcnow().isoformat(),
+    }
+
+
 def run_consensus_scan(clickhouse_client) -> dict:
     """Convenience function to run full consensus scan"""
     detector = ConsensusDetector(clickhouse_client)

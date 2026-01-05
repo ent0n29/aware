@@ -9,7 +9,8 @@ import com.polybot.hft.polymarket.fund.model.FundPosition;
 import com.polybot.hft.polymarket.fund.model.IndexConstituent;
 import com.polybot.hft.polymarket.fund.model.TraderSignal;
 import com.polybot.hft.strategy.executor.ExecutorApiClient;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -32,7 +33,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * 4. Position is tracked for P&L attribution
  */
 @Slf4j
-@RequiredArgsConstructor
 public class FundPositionMirror {
 
     private final FundConfig config;
@@ -51,6 +51,53 @@ public class FundPositionMirror {
     private int signalsProcessed = 0;
     private int ordersSubmitted = 0;
     private int ordersFailed = 0;
+
+    // Prometheus metrics
+    private final Counter signalsProcessedCounter;
+    private final Counter ordersSubmittedCounter;
+    private final Counter ordersFailedCounter;
+
+    public FundPositionMirror(
+            FundConfig config,
+            IndexWeightProvider weightProvider,
+            ExecutorApiClient executorApi,
+            Clock clock,
+            JdbcTemplate jdbcTemplate,
+            MeterRegistry meterRegistry
+    ) {
+        this.config = config;
+        this.weightProvider = weightProvider;
+        this.executorApi = executorApi;
+        this.clock = clock;
+        this.jdbcTemplate = jdbcTemplate;
+
+        // Initialize Prometheus metrics
+        this.signalsProcessedCounter = Counter.builder("fund.signals.processed")
+                .description("Total signals processed by position mirror")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        this.ordersSubmittedCounter = Counter.builder("fund.orders.submitted")
+                .description("Total orders submitted to executor")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        this.ordersFailedCounter = Counter.builder("fund.orders.failed")
+                .description("Total orders that failed submission")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        // Register gauges for open positions and pending signals
+        io.micrometer.core.instrument.Gauge.builder("fund.positions.open", positions, Map::size)
+                .description("Number of open positions")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        io.micrometer.core.instrument.Gauge.builder("fund.pending.signals", pendingSignals, Queue::size)
+                .description("Number of pending signals in queue")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+    }
 
     /**
      * Queue a signal for processing after the anti-front-running delay.
@@ -75,9 +122,11 @@ public class FundPositionMirror {
             try {
                 processSignal(pending.signal);
                 signalsProcessed++;
+                signalsProcessedCounter.increment();
             } catch (Exception e) {
                 log.error("Failed to process signal {}: {}", pending.signal.signalId(), e.getMessage());
                 ordersFailed++;
+                ordersFailedCounter.increment();
             }
         }
     }
@@ -207,6 +256,7 @@ public class FundPositionMirror {
         try {
             OrderSubmissionResult result = executorApi.placeLimitOrder(request);
             ordersSubmitted++;
+            ordersSubmittedCounter.increment();
 
             String orderId = resolveOrderId(result);
             String status = resolveStatus(result);
@@ -220,6 +270,7 @@ public class FundPositionMirror {
 
         } catch (Exception e) {
             ordersFailed++;
+            ordersFailedCounter.increment();
             log.error("Order submission failed: {}", e.getMessage());
             throw e;
         }

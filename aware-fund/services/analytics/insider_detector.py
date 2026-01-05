@@ -198,6 +198,8 @@ class InsiderDetector:
         alerts.extend(self._detect_volume_spikes(hours))
         alerts.extend(self._detect_smart_money_divergence(hours))
         alerts.extend(self._detect_whale_anomalies(hours))
+        alerts.extend(self._detect_coordinated_entry(hours))
+        alerts.extend(self._detect_late_entry_conviction(hours))
 
         # Sort by severity (CRITICAL first)
         severity_order = {
@@ -541,6 +543,252 @@ class InsiderDetector:
 
         except Exception as e:
             logger.error(f"Smart money divergence detection failed: {e}")
+
+        return alerts
+
+    def _detect_coordinated_entry(self, hours: int) -> list[InsiderAlert]:
+        """
+        Detect coordinated trading across multiple accounts.
+
+        Signal: Multiple accounts entering same market in same direction within
+        a short time window, suggesting coordination or shared information.
+        """
+        market_exclusion = self._get_market_exclusion_sql('market_slug')
+        query = f"""
+        WITH
+        -- Get trades in recent window
+        recent_trades AS (
+            SELECT
+                market_slug,
+                proxy_address,
+                username,
+                side,
+                outcome_index,
+                sum(notional) as total_bet,
+                min(ts) as first_trade_ts,
+                max(ts) as last_trade_ts
+            FROM polybot.aware_global_trades_dedup
+            WHERE ts >= now() - INTERVAL {hours} HOUR
+              AND proxy_address != ''
+              {market_exclusion}
+            GROUP BY market_slug, proxy_address, username, side, outcome_index
+        ),
+        -- Find markets with clustered entries (multiple traders in short window)
+        clustered_markets AS (
+            SELECT
+                market_slug,
+                outcome_index,
+                count(DISTINCT proxy_address) as num_traders,
+                sum(total_bet) as total_volume,
+                min(first_trade_ts) as cluster_start,
+                max(last_trade_ts) as cluster_end,
+                dateDiff('minute', min(first_trade_ts), max(last_trade_ts)) as window_minutes,
+                groupArray(username) as traders
+            FROM recent_trades
+            WHERE side = 'BUY'
+            GROUP BY market_slug, outcome_index
+            HAVING
+                num_traders >= 3
+                AND window_minutes <= 120  -- Within 2 hours
+                AND total_volume >= 10000  -- At least $10K total
+        )
+        SELECT
+            market_slug,
+            outcome_index,
+            num_traders,
+            total_volume,
+            cluster_start,
+            cluster_end,
+            window_minutes,
+            traders
+        FROM clustered_markets
+        ORDER BY num_traders DESC, total_volume DESC
+        LIMIT 30
+        """
+
+        alerts = []
+        try:
+            result = self.ch.query(query)
+
+            for row in result.result_rows:
+                market_slug = row[0]
+                outcome_index = int(row[1])
+                num_traders = int(row[2])
+                total_volume = float(row[3])
+                cluster_start = row[4]
+                cluster_end = row[5]
+                window_minutes = int(row[6])
+                traders = row[7] if isinstance(row[7], list) else []
+
+                direction = "YES" if outcome_index == 0 else "NO"
+
+                # Calculate coordination score
+                # More traders in shorter window = higher score
+                traders_per_minute = num_traders / max(1, window_minutes)
+                volume_per_trader = total_volume / num_traders
+
+                confidence = min(1.0, 0.3 + (num_traders * 0.1) + (traders_per_minute * 0.2))
+
+                # Severity based on coordination strength
+                if num_traders >= 5 and window_minutes <= 30:
+                    severity = AlertSeverity.CRITICAL
+                elif num_traders >= 4 and window_minutes <= 60:
+                    severity = AlertSeverity.HIGH
+                elif num_traders >= 3:
+                    severity = AlertSeverity.MEDIUM
+                else:
+                    severity = AlertSeverity.LOW
+
+                alerts.append(InsiderAlert(
+                    signal_type=InsiderSignalType.COORDINATED_ENTRY,
+                    severity=severity,
+                    market_slug=market_slug,
+                    market_question="",
+                    description=f"{num_traders} traders entered {direction} within {window_minutes} min, total ${total_volume:,.0f}",
+                    confidence=confidence,
+                    direction=direction,
+                    total_volume_usd=total_volume,
+                    num_traders=num_traders,
+                    detected_at=datetime.utcnow(),
+                    trade_timestamps=[cluster_start, cluster_end] if cluster_start else [],
+                    traders_involved=traders[:10],  # Limit to first 10
+                ))
+
+        except Exception as e:
+            logger.error(f"Coordinated entry detection failed: {e}")
+
+        return alerts
+
+    def _detect_late_entry_conviction(self, hours: int) -> list[InsiderAlert]:
+        """
+        Detect large bets placed close to market resolution.
+
+        Signal: Big bet when market is about to resolve, suggesting
+        high conviction from information advantage.
+        """
+        market_exclusion = self._get_market_exclusion_sql('t.market_slug')
+        query = f"""
+        WITH
+        -- Markets resolving soon (within 7 days) - approximated by recent activity pattern
+        -- Since we don't have end_date, look for markets with declining activity suggesting near resolution
+        active_markets AS (
+            SELECT
+                market_slug,
+                count() as recent_trades,
+                sum(notional) as recent_volume
+            FROM polybot.aware_global_trades_dedup
+            WHERE ts >= now() - INTERVAL 7 DAY
+              AND market_slug != ''
+            GROUP BY market_slug
+            HAVING recent_volume >= 5000
+        ),
+        -- Large recent bets in these markets
+        large_bets AS (
+            SELECT
+                t.proxy_address,
+                t.username,
+                t.market_slug,
+                t.side,
+                t.outcome_index,
+                sum(t.notional) as bet_size,
+                min(t.ts) as first_bet,
+                count() as num_bets
+            FROM polybot.aware_global_trades_dedup t
+            INNER JOIN active_markets am ON t.market_slug = am.market_slug
+            WHERE t.ts >= now() - INTERVAL {hours} HOUR
+              AND t.proxy_address != ''
+              {market_exclusion}
+            GROUP BY t.proxy_address, t.username, t.market_slug, t.side, t.outcome_index
+            HAVING bet_size >= 10000  -- Large bets only
+        ),
+        -- Check if this is unusual for the trader (first time in market or much larger than usual)
+        trader_history AS (
+            SELECT
+                proxy_address,
+                market_slug,
+                sum(notional) as historical_volume
+            FROM polybot.aware_global_trades_dedup
+            WHERE ts < now() - INTERVAL {hours} HOUR
+              AND proxy_address != ''
+            GROUP BY proxy_address, market_slug
+        )
+        SELECT
+            lb.proxy_address,
+            lb.username,
+            lb.market_slug,
+            lb.side,
+            lb.outcome_index,
+            lb.bet_size,
+            lb.first_bet,
+            lb.num_bets,
+            th.historical_volume
+        FROM large_bets lb
+        LEFT JOIN trader_history th ON lb.proxy_address = th.proxy_address AND lb.market_slug = th.market_slug
+        WHERE
+            -- Either never traded this market or betting much more than before
+            th.historical_volume IS NULL OR lb.bet_size > th.historical_volume * 2
+        ORDER BY lb.bet_size DESC
+        LIMIT 30
+        """
+
+        alerts = []
+        try:
+            result = self.ch.query(query)
+
+            for row in result.result_rows:
+                proxy_address = row[0]
+                username = row[1] or "anonymous"
+                market_slug = row[2]
+                side = row[3]
+                outcome_index = int(row[4])
+                bet_size = float(row[5])
+                first_bet = row[6]
+                num_bets = int(row[7])
+                historical_volume = float(row[8]) if row[8] else 0
+
+                direction = "YES" if outcome_index == 0 else "NO"
+
+                # First time in market is more suspicious
+                is_new_to_market = historical_volume == 0
+
+                # Calculate conviction score
+                confidence = 0.4
+                if is_new_to_market:
+                    confidence += 0.25
+                if bet_size >= 25000:
+                    confidence += 0.2
+                if bet_size >= 50000:
+                    confidence += 0.15
+                confidence = min(1.0, confidence)
+
+                # Severity
+                if bet_size >= 50000 and is_new_to_market:
+                    severity = AlertSeverity.CRITICAL
+                elif bet_size >= 25000 and is_new_to_market:
+                    severity = AlertSeverity.HIGH
+                elif bet_size >= 10000:
+                    severity = AlertSeverity.MEDIUM
+                else:
+                    severity = AlertSeverity.LOW
+
+                reason = "first entry" if is_new_to_market else f"{bet_size/historical_volume:.1f}x historical"
+                alerts.append(InsiderAlert(
+                    signal_type=InsiderSignalType.LATE_ENTRY_CONVICTION,
+                    severity=severity,
+                    market_slug=market_slug,
+                    market_question="",
+                    description=f"'{username}' bet ${bet_size:,.0f} on {direction} ({reason})",
+                    confidence=confidence,
+                    direction=direction,
+                    total_volume_usd=bet_size,
+                    num_traders=1,
+                    detected_at=datetime.utcnow(),
+                    trade_timestamps=[first_bet] if first_bet else [],
+                    traders_involved=[username],
+                ))
+
+        except Exception as e:
+            logger.error(f"Late entry conviction detection failed: {e}")
 
         return alerts
 

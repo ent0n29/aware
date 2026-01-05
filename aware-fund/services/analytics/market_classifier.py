@@ -249,6 +249,9 @@ class TraderCategoryProfiler:
 
     Used to determine which traders specialize in which categories
     for sectorial index inclusion.
+
+    NOTE: This uses the pre-computed aware_market_classifications table
+    populated by market_classification_job.py for efficiency.
     """
 
     def __init__(self, clickhouse_client, classifier: Optional[MarketClassifier] = None):
@@ -262,13 +265,64 @@ class TraderCategoryProfiler:
         """
         Get a trader's volume distribution across market categories.
 
+        Uses the pre-computed aware_market_classifications table for efficiency.
+        Falls back to on-the-fly classification if classifications table is empty.
+
         Args:
             proxy_address: Trader's wallet address
 
         Returns:
             Dict mapping category -> percentage of volume (0.0 to 1.0)
         """
-        # Get trader's markets and volumes
+        # First try using the pre-computed classifications table (efficient)
+        query = """
+        SELECT
+            COALESCE(c.market_category, 'OTHER') AS category,
+            sum(t.notional) as volume
+        FROM polybot.aware_global_trades_dedup t
+        LEFT JOIN polybot.aware_market_classifications c FINAL
+            ON t.market_slug = c.market_slug
+        WHERE t.proxy_address = %(addr)s
+        GROUP BY category
+        """
+
+        try:
+            result = self.ch.query(query, parameters={'addr': proxy_address})
+
+            if not result.result_rows:
+                return {}
+
+            category_volumes = {cat.value: 0.0 for cat in MarketCategory}
+            total_volume = 0.0
+
+            for row in result.result_rows:
+                category, volume = row[0], float(row[1] or 0)
+                if category in category_volumes:
+                    category_volumes[category] += volume
+                else:
+                    category_volumes['OTHER'] += volume
+                total_volume += volume
+
+            # Convert to percentages
+            if total_volume > 0:
+                return {
+                    cat: vol / total_volume
+                    for cat, vol in category_volumes.items()
+                }
+
+            return {}
+
+        except Exception as e:
+            logger.error(f"Failed to get category distribution for {proxy_address}: {e}")
+            # Fall back to on-the-fly classification
+            return self._get_distribution_fallback(proxy_address)
+
+    def _get_distribution_fallback(self, proxy_address: str) -> dict[str, float]:
+        """
+        Fallback: classify on-the-fly if classifications table is unavailable.
+
+        This is slower but works when the table hasn't been populated yet.
+        """
         query = """
         SELECT
             market_slug,
@@ -284,7 +338,6 @@ class TraderCategoryProfiler:
             if not result.result_rows:
                 return {}
 
-            # Classify each market and aggregate volumes
             category_volumes = {cat.value: 0.0 for cat in MarketCategory}
             total_volume = 0.0
 
@@ -294,7 +347,6 @@ class TraderCategoryProfiler:
                 category_volumes[category.value] += volume
                 total_volume += volume
 
-            # Convert to percentages
             if total_volume > 0:
                 return {
                     cat: vol / total_volume
@@ -304,71 +356,65 @@ class TraderCategoryProfiler:
             return {}
 
         except Exception as e:
-            logger.error(f"Failed to get category distribution for {proxy_address}: {e}")
+            logger.error(f"Fallback classification failed for {proxy_address}: {e}")
             return {}
 
     def get_all_trader_profiles(self, limit: int = 10000) -> dict[str, dict[str, float]]:
         """
         Get category distributions for all top traders.
 
+        Uses the pre-computed aware_market_classifications table for efficiency.
+
         Returns:
             Dict mapping proxy_address -> {category: percentage}
         """
-        # Get all trader markets in one batch query
+        # Use pre-computed classifications with a single efficient query
         query = f"""
-        WITH trader_markets AS (
+        WITH trader_category_volumes AS (
             SELECT
-                proxy_address,
-                market_slug,
-                sum(notional) as volume
-            FROM polybot.aware_global_trades_dedup
-            WHERE proxy_address != ''
-            GROUP BY proxy_address, market_slug
+                t.proxy_address,
+                COALESCE(c.market_category, 'OTHER') AS category,
+                sum(t.notional) as volume
+            FROM polybot.aware_global_trades_dedup t
+            LEFT JOIN polybot.aware_market_classifications c FINAL
+                ON t.market_slug = c.market_slug
+            WHERE t.proxy_address != ''
+            GROUP BY t.proxy_address, category
         ),
         trader_totals AS (
             SELECT
                 proxy_address,
                 sum(volume) as total_volume
-            FROM trader_markets
+            FROM trader_category_volumes
             GROUP BY proxy_address
             ORDER BY total_volume DESC
             LIMIT {limit}
         )
         SELECT
-            tm.proxy_address,
-            tm.market_slug,
-            tm.volume
-        FROM trader_markets tm
-        INNER JOIN trader_totals tt ON tm.proxy_address = tt.proxy_address
+            tcv.proxy_address,
+            tcv.category,
+            tcv.volume,
+            tt.total_volume
+        FROM trader_category_volumes tcv
+        INNER JOIN trader_totals tt ON tcv.proxy_address = tt.proxy_address
         """
 
         try:
-            logger.info("Fetching market distributions for all traders...")
+            logger.info("Fetching category distributions for all traders...")
             result = self.ch.query(query)
 
-            # Group by trader
-            trader_markets = {}
-            for row in result.result_rows:
-                addr, slug, volume = row[0], row[1], float(row[2] or 0)
-                if addr not in trader_markets:
-                    trader_markets[addr] = {}
-                trader_markets[addr][slug] = volume
-
-            # Classify and aggregate
+            # Build profiles directly from pre-aggregated categories
             profiles = {}
-            for addr, markets in trader_markets.items():
-                category_volumes = {cat.value: 0.0 for cat in MarketCategory}
-                total_volume = sum(markets.values())
+            for row in result.result_rows:
+                addr, category, volume, total_volume = row[0], row[1], float(row[2] or 0), float(row[3] or 0)
 
-                for slug, volume in markets.items():
-                    category = self.classifier.classify(slug)
-                    category_volumes[category.value] += volume
+                if addr not in profiles:
+                    profiles[addr] = {cat.value: 0.0 for cat in MarketCategory}
 
-                if total_volume > 0:
-                    profiles[addr] = {
-                        cat: vol / total_volume
-                        for cat, vol in category_volumes.items()
-                    }
+                if category in profiles[addr]:
+                    profiles[addr][category] = volume / total_volume if total_volume > 0 else 0.0
+                else:
+                    profiles[addr]['OTHER'] += volume / total_volume if total_volume > 0 else 0.0
 
             logger.info(f"Profiled {len(profiles)} traders across categories")
             return profiles

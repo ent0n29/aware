@@ -3,6 +3,9 @@ package com.polybot.hft.polymarket.fund.service;
 import com.polybot.hft.polymarket.fund.config.FundConfig;
 import com.polybot.hft.polymarket.fund.model.IndexConstituent;
 import com.polybot.hft.polymarket.fund.model.TraderSignal;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -44,18 +47,48 @@ public class FundTradeListener {
     private long tradesProcessed = 0;
     private long signalsGenerated = 0;
 
+    // Prometheus metrics
+    private final Counter tradesPolledCounter;
+    private final Counter signalsGeneratedCounter;
+    private final Timer pollDurationTimer;
+    private final MeterRegistry meterRegistry;
+
     public FundTradeListener(
             FundConfig config,
             IndexWeightProvider weightProvider,
             FundPositionMirror positionMirror,
             JdbcTemplate jdbcTemplate,
-            Clock clock
+            Clock clock,
+            MeterRegistry meterRegistry
     ) {
         this.config = config;
         this.weightProvider = weightProvider;
         this.positionMirror = positionMirror;
         this.jdbcTemplate = jdbcTemplate;
         this.clock = clock;
+        this.meterRegistry = meterRegistry;
+
+        // Initialize Prometheus metrics
+        this.tradesPolledCounter = Counter.builder("fund.trades.polled")
+                .description("Total trades polled from ClickHouse")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        this.signalsGeneratedCounter = Counter.builder("fund.signals.generated")
+                .description("Total signals generated from trader activity")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        this.pollDurationTimer = Timer.builder("fund.poll.duration")
+                .description("Time to poll for trades from ClickHouse")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
+
+        // Register gauge for tracked traders count
+        io.micrometer.core.instrument.Gauge.builder("fund.traders.tracked", lastTradeByTrader, Map::size)
+                .description("Number of tracked traders")
+                .tag("fund", config.indexType())
+                .register(meterRegistry);
     }
 
     /**
@@ -69,10 +102,11 @@ public class FundTradeListener {
         }
 
         try {
-            List<TraderSignal> signals = fetchNewTrades();
+            List<TraderSignal> signals = pollDurationTimer.record(() -> fetchNewTrades());
             for (TraderSignal signal : signals) {
                 positionMirror.queueSignal(signal);
                 signalsGenerated++;
+                signalsGeneratedCounter.increment();
             }
         } catch (Exception e) {
             log.warn("Error polling for trades: {}", e.getMessage());
@@ -86,8 +120,10 @@ public class FundTradeListener {
         // Get current index constituents
         List<IndexConstituent> constituents = weightProvider.getConstituents(config.indexType());
         if (constituents.isEmpty()) {
+            log.warn("No constituents found for index: {}. Check aware_psi_index table.", config.indexType());
             return List.of();
         }
+        log.debug("Fetching trades for {} constituents in index {}", constituents.size(), config.indexType());
 
         // Build proxy address list
         List<String> addresses = constituents.stream()
@@ -104,6 +140,12 @@ public class FundTradeListener {
         // Query for new trades
         List<RawTrade> trades = queryTrades(addresses, lastPollTime, now);
         tradesProcessed += trades.size();
+        tradesPolledCounter.increment(trades.size());
+
+        if (!trades.isEmpty()) {
+            log.info("Found {} new trades from PSI-10 traders (window: {} to {})",
+                    trades.size(), lastPollTime, now);
+        }
 
         // Update highwater mark
         lastPollTime = now;
@@ -146,8 +188,19 @@ public class FundTradeListener {
             return List.of();
         }
 
-        // Build parameterized query with proper IN clause
-        String placeholders = String.join(",", Collections.nCopies(addresses.size(), "?"));
+        // Build query with quoted address list and formatted timestamps
+        // ClickHouse JDBC doesn't handle IN clause placeholders well
+        String addressList = addresses.stream()
+                .map(addr -> "'" + addr + "'")
+                .collect(java.util.stream.Collectors.joining(","));
+
+        // Format timestamps for ClickHouse DateTime64
+        java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter
+                .ofPattern("yyyy-MM-dd HH:mm:ss")
+                .withZone(java.time.ZoneOffset.UTC);
+        String fromStr = fmt.format(from);
+        String toStr = fmt.format(to);
+
         String sql = """
             SELECT
                 ts,
@@ -163,22 +216,15 @@ public class FundTradeListener {
                 notional
             FROM polybot.aware_global_trades_dedup
             WHERE proxy_address IN (%s)
-              AND ts > ?
-              AND ts <= ?
+              AND ts > toDateTime('%s')
+              AND ts <= toDateTime('%s')
             ORDER BY ts
             LIMIT 100
-            """.formatted(placeholders);
+            """.formatted(addressList, fromStr, toStr);
 
-        // Build params array
-        Object[] params = new Object[addresses.size() + 2];
-        for (int i = 0; i < addresses.size(); i++) {
-            params[i] = addresses.get(i);
-        }
-        params[addresses.size()] = Timestamp.from(from);
-        params[addresses.size() + 1] = Timestamp.from(to);
-
+        log.debug("Querying trades: {} addresses, from={}, to={}", addresses.size(), from, to);
         try {
-            return jdbcTemplate.query(sql, (rs, rowNum) -> new RawTrade(
+            List<RawTrade> result = jdbcTemplate.query(sql, (rs, rowNum) -> new RawTrade(
                     rs.getTimestamp("ts").toInstant(),
                     rs.getString("trade_id"),
                     rs.getString("username"),
@@ -190,9 +236,13 @@ public class FundTradeListener {
                     rs.getDouble("price"),
                     rs.getDouble("size"),
                     rs.getDouble("notional")
-            ), params);
+            ));
+            if (!result.isEmpty()) {
+                log.info("Found {} trades from PSI traders", result.size());
+            }
+            return result;
         } catch (Exception e) {
-            log.debug("Trade query error: {}", e.getMessage());
+            log.warn("Trade query error: {}", e.getMessage());
             return List.of();
         }
     }

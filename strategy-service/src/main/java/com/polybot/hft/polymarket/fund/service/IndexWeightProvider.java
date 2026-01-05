@@ -89,6 +89,7 @@ public class IndexWeightProvider {
     private List<IndexConstituent> loadFromClickHouse(String indexName) {
         // Uses 200_fund_schema.sql aware_psi_index structure
         // Columns: index_type, username, proxy_address, weight, total_score, sharpe_ratio, strategy_type
+        // Note: ClickHouse doesn't allow "table FINAL AS alias" syntax, so we use subqueries
         String sql = """
             SELECT
                 i.username,
@@ -99,9 +100,8 @@ public class IndexWeightProvider {
                 i.total_score AS smart_money_score,
                 COALESCE(i.strategy_type, 'UNKNOWN') AS strategy_type,
                 p.last_trade_at
-            FROM polybot.aware_psi_index FINAL AS i
-            LEFT JOIN polybot.aware_trader_profiles FINAL AS p ON i.proxy_address = p.proxy_address
-            WHERE i.index_type = ?
+            FROM (SELECT * FROM polybot.aware_psi_index FINAL WHERE index_type = ?) AS i
+            LEFT JOIN (SELECT * FROM polybot.aware_trader_profiles FINAL) AS p ON i.proxy_address = p.proxy_address
             ORDER BY i.weight DESC
             """;
 

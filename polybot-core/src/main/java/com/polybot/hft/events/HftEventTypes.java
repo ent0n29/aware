@@ -6,6 +6,7 @@ public final class HftEventTypes {
   }
 
   public static final String MARKET_WS_TOB = "market_ws.tob";
+  public static final String MARKET_WS_TRADE = "market_ws.trade";
 
   public static final String STRATEGY_GABAGOOL_ORDER = "strategy.gabagool.order";
 

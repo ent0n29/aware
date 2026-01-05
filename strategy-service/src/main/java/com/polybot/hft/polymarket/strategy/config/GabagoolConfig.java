@@ -39,6 +39,7 @@ public record GabagoolConfig(
         TimingConfig timing = new TimingConfig(
                 cfg.refreshMillis(),
                 cfg.minReplaceMillis(),
+                cfg.forceReplaceMillis(),
                 cfg.minSecondsToEnd(),
                 cfg.maxSecondsToEnd()
         );
@@ -65,6 +66,7 @@ public record GabagoolConfig(
 
         CompleteSetConfig completeSet = new CompleteSetConfig(
                 cfg.completeSetMinEdge(),
+                cfg.completeSetCancelEdge(),
                 cfg.completeSetMaxSkewTicks(),
                 cfg.completeSetImbalanceSharesForMaxSkew(),
                 cfg.completeSetTopUpEnabled(),
@@ -75,13 +77,19 @@ public record GabagoolConfig(
                 cfg.completeSetFastTopUpMinSecondsAfterFill(),
                 cfg.completeSetFastTopUpMaxSecondsAfterFill(),
                 cfg.completeSetFastTopUpCooldownMillis(),
-                cfg.completeSetFastTopUpMinEdge()
+                cfg.completeSetFastTopUpMinEdge(),
+                cfg.completeSetFastTopUpFraction(),
+                cfg.completeSetFastTopUpProbability(),
+                cfg.completeSetHedgeDelayEnabled(),
+                cfg.completeSetHedgeDelayMinSeconds(),
+                cfg.completeSetHedgeDelayMaxSeconds()
         );
 
         TakerConfig taker = new TakerConfig(
                 cfg.takerModeEnabled(),
                 cfg.takerModeMaxEdge(),
-                cfg.takerModeMaxSpread()
+                cfg.takerModeMaxSpread(),
+                cfg.takerModeProbability()
         );
 
         List<GabagoolMarketConfig> markets = cfg.markets() == null ? List.of() :
@@ -103,6 +111,7 @@ public record GabagoolConfig(
     // Convenience accessors for backwards compatibility
     public long refreshMillis() { return timing.refreshMillis(); }
     public long minReplaceMillis() { return timing.minReplaceMillis(); }
+    public long forceReplaceMillis() { return timing.forceReplaceMillis(); }
     public long minSecondsToEnd() { return timing.minSecondsToEnd(); }
     public long maxSecondsToEnd() { return timing.maxSecondsToEnd(); }
 
@@ -123,6 +132,7 @@ public record GabagoolConfig(
     public double maxTotalBankrollFraction() { return bankroll.maxTotalBankrollFraction(); }
 
     public double completeSetMinEdge() { return completeSet.minEdge(); }
+    public double completeSetCancelEdge() { return completeSet.cancelEdge(); }
     public int completeSetMaxSkewTicks() { return completeSet.maxSkewTicks(); }
     public BigDecimal completeSetImbalanceSharesForMaxSkew() { return completeSet.imbalanceSharesForMaxSkew(); }
     public boolean completeSetTopUpEnabled() { return completeSet.topUpEnabled(); }
@@ -134,10 +144,16 @@ public record GabagoolConfig(
     public long completeSetFastTopUpMaxSecondsAfterFill() { return completeSet.fastTopUpMaxSecondsAfterFill(); }
     public long completeSetFastTopUpCooldownMillis() { return completeSet.fastTopUpCooldownMillis(); }
     public double completeSetFastTopUpMinEdge() { return completeSet.fastTopUpMinEdge(); }
+    public double completeSetFastTopUpFraction() { return completeSet.fastTopUpFraction(); }
+    public double completeSetFastTopUpProbability() { return completeSet.fastTopUpProbability(); }
+    public boolean completeSetHedgeDelayEnabled() { return completeSet.hedgeDelayEnabled(); }
+    public long completeSetHedgeDelayMinSeconds() { return completeSet.hedgeDelayMinSeconds(); }
+    public long completeSetHedgeDelayMaxSeconds() { return completeSet.hedgeDelayMaxSeconds(); }
 
     public boolean takerModeEnabled() { return taker.enabled(); }
     public double takerModeMaxEdge() { return taker.maxEdge(); }
     public BigDecimal takerModeMaxSpread() { return taker.maxSpread(); }
+    public double takerModeProbability() { return taker.probability(); }
 
     public record GabagoolMarketConfig(
             String slug,

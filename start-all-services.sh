@@ -10,13 +10,31 @@ echo ""
 # Navigate to project root
 cd "$(dirname "$0")"
 
-# Build if needed
-if [ ! -f "executor-service/target/executor-service-0.0.1-SNAPSHOT.jar" ] || \
-   [ ! -f "strategy-service/target/strategy-service-0.0.1-SNAPSHOT.jar" ] || \
-   [ ! -f "ingestor-service/target/ingestor-service-0.0.1-SNAPSHOT.jar" ] || \
-   [ ! -f "infrastructure-orchestrator-service/target/infrastructure-orchestrator-service-0.0.1-SNAPSHOT.jar" ]; then
-    echo "Building all services..."
-    mvn clean package -DskipTests
+# Build if needed (missing jars OR any src/resources newer than jar)
+needs_build=false
+check_build() {
+    local jar_path="$1"
+    local src_path="$2"
+    if [ ! -f "$jar_path" ]; then
+        needs_build=true
+        return
+    fi
+    if [ -d "$src_path" ]; then
+        if find "$src_path" -type f -newer "$jar_path" -print -quit | grep -q .; then
+            needs_build=true
+        fi
+    fi
+}
+
+check_build "executor-service/target/executor-service-0.0.1-SNAPSHOT.jar" "executor-service/src"
+check_build "strategy-service/target/strategy-service-0.0.1-SNAPSHOT.jar" "strategy-service/src"
+check_build "ingestor-service/target/ingestor-service-0.0.1-SNAPSHOT.jar" "ingestor-service/src"
+check_build "analytics-service/target/analytics-service-0.0.1-SNAPSHOT.jar" "analytics-service/src"
+check_build "infrastructure-orchestrator-service/target/infrastructure-orchestrator-service-0.0.1-SNAPSHOT.jar" "infrastructure-orchestrator-service/src"
+
+if [ "$needs_build" = true ]; then
+    echo "Building services (incremental)..."
+    mvn package -DskipTests
     echo ""
 fi
 

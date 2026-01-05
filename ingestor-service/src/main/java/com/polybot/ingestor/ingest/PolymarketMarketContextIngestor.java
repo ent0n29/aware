@@ -74,6 +74,7 @@ public class PolymarketMarketContextIngestor {
     if (slug == null) {
       return;
     }
+    String conditionId = textOrNull(userTrade.path("conditionId"));
 
     long nowMillis = Instant.now(clock).toEpochMilli();
     MarketState state;
@@ -94,7 +95,7 @@ public class PolymarketMarketContextIngestor {
     long ageSeconds = Math.max(0, (nowMillis - userTradeAt.toEpochMilli()) / 1000L);
     if (ageSeconds <= maxAgeSeconds) {
       maybePublishClobTobContext(username, proxyAddress, userTradeKey, userTradeAt, userTrade, state, nowMillis);
-      maybeFetchAndPublishMarketTrades(slug, state, nowMillis);
+      maybeFetchAndPublishMarketTrades(slug, conditionId, state, nowMillis);
     }
   }
 
@@ -384,17 +385,21 @@ public class PolymarketMarketContextIngestor {
     publishedClobTobs.incrementAndGet();
   }
 
-  private void maybeFetchAndPublishMarketTrades(String slug, MarketState state, long nowMillis) {
+  private void maybeFetchAndPublishMarketTrades(String slug, String conditionId, MarketState state, long nowMillis) {
     long minIntervalMillis = properties.marketContext().marketTradesMinIntervalSeconds() * 1000L;
     if (nowMillis - state.lastMarketTradesFetchAtMillis < minIntervalMillis) {
       return;
     }
     state.lastMarketTradesFetchAtMillis = nowMillis;
 
+    if (conditionId == null || conditionId.isBlank()) {
+      return;
+    }
+
     int limit = properties.marketContext().marketTradesLimit();
     ArrayNode trades;
     try {
-      trades = dataApi.getMarketTrades(slug, limit, 0);
+      trades = dataApi.getMarketTrades(conditionId, limit, 0);
     } catch (Exception e) {
       failures.incrementAndGet();
       log.debug("market-context market trades fetch failed slug={} error={}", slug, e.toString());
@@ -405,6 +410,11 @@ public class PolymarketMarketContextIngestor {
     for (int i = trades.size() - 1; i >= 0; i--) {
       JsonNode trade = trades.get(i);
       if (trade == null || trade.isNull()) {
+        continue;
+      }
+      // Defensive: ensure the returned trade belongs to this slug.
+      String tradeSlug = trade.path("slug").asText(null);
+      if (tradeSlug != null && !tradeSlug.isBlank() && !tradeSlug.equals(slug)) {
         continue;
       }
 

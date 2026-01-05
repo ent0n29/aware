@@ -88,7 +88,7 @@ def main() -> int:
     gab_rows = ch.query_rows(
         f"""
         SELECT market_slug, count() AS trades
-        FROM polybot.user_trades_dedup
+        FROM polybot.user_trades
         WHERE username = '{args.gab_username}'
           AND {SERIES_WHERE}
           {where}

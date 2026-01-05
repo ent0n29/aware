@@ -26,11 +26,17 @@ public class PolymarketDataApiClient {
     return getArray("/positions", userAddress, limit, offset);
   }
 
-  public ArrayNode getMarketTrades(String marketSlug, int limit, int offset) {
+  /**
+   * Fetch recent trades for a single market (condition).
+   *
+   * Note: the Polymarket data-api expects the {@code market} query param to be the conditionId
+   * (a 0x... hex string), not the human-readable slug.
+   */
+  public ArrayNode getMarketTrades(String conditionId, int limit, int offset) {
     String body = polymarketDataApiRestClient.get()
         .uri(uriBuilder -> uriBuilder
             .path("/trades")
-            .queryParam("market", marketSlug)
+            .queryParam("market", conditionId)
             .queryParam("limit", limit)
             .queryParam("offset", offset)
             .build())
@@ -46,10 +52,40 @@ public class PolymarketDataApiClient {
       if (parsed instanceof ArrayNode arr) {
         return arr;
       }
-      log.warn("Unexpected data-api response type path=/trades market={} limit={} offset={} jsonType={}", marketSlug, limit, offset, parsed.getNodeType());
+      log.warn("Unexpected data-api response type path=/trades market={} limit={} offset={} jsonType={}", conditionId, limit, offset, parsed.getNodeType());
       return objectMapper.createArrayNode();
     } catch (Exception e) {
-      throw new RuntimeException("Failed parsing data-api response path=/trades market=%s limit=%d offset=%d".formatted(marketSlug, limit, offset), e);
+      throw new RuntimeException("Failed parsing data-api response path=/trades market=%s limit=%d offset=%d".formatted(conditionId, limit, offset), e);
+    }
+  }
+
+  /**
+   * Fetch global trades (all users, all markets) - for AWARE Fund indexing.
+   * No user or market filter applied.
+   */
+  public ArrayNode getGlobalTrades(int limit, int offset) {
+    String body = polymarketDataApiRestClient.get()
+        .uri(uriBuilder -> uriBuilder
+            .path("/trades")
+            .queryParam("limit", limit)
+            .queryParam("offset", offset)
+            .build())
+        .retrieve()
+        .body(String.class);
+
+    if (body == null || body.isBlank()) {
+      return objectMapper.createArrayNode();
+    }
+
+    try {
+      JsonNode parsed = objectMapper.readTree(body);
+      if (parsed instanceof ArrayNode arr) {
+        return arr;
+      }
+      log.warn("Unexpected data-api response type path=/trades (global) limit={} offset={} jsonType={}", limit, offset, parsed.getNodeType());
+      return objectMapper.createArrayNode();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed parsing data-api response path=/trades (global) limit=%d offset=%d".formatted(limit, offset), e);
     }
   }
 

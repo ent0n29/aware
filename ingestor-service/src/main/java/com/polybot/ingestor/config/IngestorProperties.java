@@ -15,7 +15,8 @@ import java.net.URI;
 public record IngestorProperties(
     @Valid Polymarket polymarket,
     @Valid Polling polling,
-    @Valid MarketContext marketContext
+    @Valid MarketContext marketContext,
+    @Valid GlobalTrades globalTrades
 ) {
 
   public IngestorProperties {
@@ -27,6 +28,9 @@ public record IngestorProperties(
     }
     if (marketContext == null) {
       marketContext = new MarketContext(null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+    if (globalTrades == null) {
+      globalTrades = new GlobalTrades(null, null, null, null, null, null);
     }
   }
 
@@ -140,6 +144,40 @@ public record IngestorProperties(
       }
       if (onTradeContextMaxAgeSeconds == null) {
         onTradeContextMaxAgeSeconds = 300;
+      }
+    }
+  }
+
+  /**
+   * AWARE Fund Global Trades Ingestion Configuration.
+   * When enabled, ingests ALL Polymarket trades for Smart Money Index.
+   */
+  public record GlobalTrades(
+      @NotNull Boolean enabled,
+      @NotNull @Min(1) Integer pollIntervalSeconds,
+      @NotNull @Min(1) Integer pageSize,
+      @NotNull @PositiveOrZero Long requestDelayMillis,
+      @NotNull Boolean backfillOnStart,
+      @PositiveOrZero Integer backfillMaxPages
+  ) {
+    public GlobalTrades {
+      if (enabled == null) {
+        enabled = false;  // Disabled by default
+      }
+      if (pollIntervalSeconds == null) {
+        pollIntervalSeconds = 30;
+      }
+      if (pageSize == null) {
+        pageSize = 500;
+      }
+      if (requestDelayMillis == null) {
+        requestDelayMillis = 100L;
+      }
+      if (backfillOnStart == null) {
+        backfillOnStart = false;
+      }
+      if (backfillMaxPages == null) {
+        backfillMaxPages = 100;
       }
     }
   }

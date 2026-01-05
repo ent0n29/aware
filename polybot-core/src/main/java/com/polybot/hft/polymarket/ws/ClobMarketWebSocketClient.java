@@ -6,6 +6,7 @@ import com.polybot.hft.config.HftProperties;
 import com.polybot.hft.events.HftEventPublisher;
 import com.polybot.hft.events.HftEventTypes;
 import com.polybot.hft.events.HftEventsProperties;
+import com.polybot.hft.events.payload.MarketTradeEvent;
 import com.polybot.hft.events.payload.MarketTopOfBookEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -55,6 +56,7 @@ public class ClobMarketWebSocketClient {
   private final Map<String, TopOfBook> topOfBookByAssetId = new ConcurrentHashMap<>();
   private final Set<String> subscribedAssetIds = ConcurrentHashMap.newKeySet();
   private final Map<String, AtomicLong> lastTobEventAtMillisByAssetId = new ConcurrentHashMap<>();
+  private final Map<String, String> lastTradeKeyByAssetId = new ConcurrentHashMap<>();
 
   private final AtomicLong messagesReceived = new AtomicLong(0);
   private final AtomicLong bookMessages = new AtomicLong(0);
@@ -241,6 +243,7 @@ public class ClobMarketWebSocketClient {
       // Prune stale caches so we don't persist/heartbeat thousands of dead markets.
       topOfBookByAssetId.keySet().retainAll(desired);
       lastTobEventAtMillisByAssetId.keySet().retainAll(desired);
+      lastTradeKeyByAssetId.keySet().retainAll(desired);
 
       if (!started) {
         connectLocked();
@@ -522,10 +525,9 @@ public class ClobMarketWebSocketClient {
       Instant prevTradeAt = prev == null ? null : prev.lastTradeAt();
 
       BigDecimal nextLast = lastTradePrice != null ? lastTradePrice : prevLast;
-      Instant nextTradeAt = prevTradeAt;
-      if (nextLast != null && (prevLast == null || (lastTradePrice != null && prevLast != null && lastTradePrice.compareTo(prevLast) != 0))) {
-        nextTradeAt = now;
-      }
+      // Book snapshots do not carry a trade timestamp; only set lastTradeAt on cold-start.
+      // Trade timestamps are sourced from explicit `last_trade_price` events (which include a millisecond timestamp + tx hash).
+      Instant nextTradeAt = prevTradeAt == null && nextLast != null ? now : prevTradeAt;
       BigDecimal nextBidSize = bestBidSize != null ? bestBidSize : (prev == null ? null : prev.bestBidSize());
       BigDecimal nextAskSize = bestAskSize != null ? bestAskSize : (prev == null ? null : prev.bestAskSize());
       return new TopOfBook(bestBid, bestAsk, nextBidSize, nextAskSize, nextLast, now, nextTradeAt);
@@ -568,17 +570,58 @@ public class ClobMarketWebSocketClient {
       return;
     }
     BigDecimal price = parseDecimal(node.path("price").asText(null));
-    Instant now = Instant.now(clock);
+    BigDecimal size = parseDecimal(node.path("size").asText(null));
+    String side = node.path("side").asText(null);
+    String market = node.path("market").asText(null);
+    String txHash = node.path("transaction_hash").asText(null);
+    long feeRateBps = node.path("fee_rate_bps").asLong(0L);
+
+    long tsMs = node.path("timestamp").asLong(0L);
+    Instant tradeAt = tsMs > 0 ? Instant.ofEpochMilli(tsMs) : Instant.now(clock);
+    Instant capturedAt = Instant.now(clock);
+
     TopOfBook tob = topOfBookByAssetId.compute(assetId, (k, prev) -> new TopOfBook(
         prev == null ? null : prev.bestBid(),
         prev == null ? null : prev.bestAsk(),
         prev == null ? null : prev.bestBidSize(),
         prev == null ? null : prev.bestAskSize(),
         price,
-        now,
-        now
+        capturedAt,
+        tradeAt
     ));
     maybePublishTopOfBook(assetId, tob);
+
+    if (!events.isEnabled()) {
+      return;
+    }
+    if (price == null || size == null || size.compareTo(BigDecimal.ZERO) <= 0 || side == null || side.isBlank()) {
+      return;
+    }
+    String sideNorm = side.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!"BUY".equals(sideNorm) && !"SELL".equals(sideNorm)) {
+      return;
+    }
+
+    String tradeKey = txHash != null && !txHash.isBlank()
+        ? txHash.trim()
+        : assetId + ":" + tradeAt.toEpochMilli() + ":" + sideNorm + ":" + price + ":" + size;
+    String prevKey = lastTradeKeyByAssetId.put(assetId, tradeKey);
+    if (tradeKey.equals(prevKey)) {
+      return;
+    }
+
+    MarketTradeEvent trade = new MarketTradeEvent(
+        market,
+        assetId,
+        price,
+        size,
+        sideNorm,
+        feeRateBps,
+        txHash,
+        tradeAt,
+        capturedAt
+    );
+    events.publish(tradeAt, HftEventTypes.MARKET_WS_TRADE, assetId + ":" + tradeKey, trade);
   }
 
   private void maybePublishTopOfBook(String assetId, TopOfBook tob) {

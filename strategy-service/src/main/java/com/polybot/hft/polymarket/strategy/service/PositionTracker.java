@@ -71,7 +71,11 @@ public class PositionTracker {
      */
     public void syncInventory(List<GabagoolMarket> markets) {
         PositionsCache cache = positionsCache.get();
-        if (cache == null || cache.sharesByTokenId() == null || cache.sharesByTokenId().isEmpty()) return;
+        if (cache == null || cache.sharesByTokenId() == null) return;
+        if (cache.sharesByTokenId().isEmpty()) {
+            inventoryByMarket.clear();
+            return;
+        }
         if (markets == null || markets.isEmpty()) return;
 
         Map<String, BigDecimal> shares = cache.sharesByTokenId();

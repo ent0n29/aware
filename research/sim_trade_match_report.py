@@ -114,11 +114,11 @@ class ClickHouseHttp:
 
 def _pick_trade_source(ch: ClickHouseHttp) -> str:
     tables = ch.show_tables()
-    # Prefer the canonical deduped trade stream (much cheaper than enriched views).
-    for t in ("user_trades_dedup", "user_trade_enriched_v4", "user_trade_enriched_v3", "user_trade_enriched_v2"):
+    # Prefer a time-filterable MergeTree table to avoid global GROUP BY/OOM issues.
+    for t in ("user_trades", "user_trades_dedup", "user_trade_enriched_v4", "user_trade_enriched_v3", "user_trade_enriched_v2"):
         if t in tables:
             return t
-    raise RuntimeError("No trade source found (expected user_trades_dedup or user_trade_enriched_v2/v3/v4)")
+    raise RuntimeError("No trade source found (expected user_trades/user_trades_dedup or user_trade_enriched_v2/v3/v4)")
 
 
 def _fetch_user_trades(
@@ -172,6 +172,11 @@ def _fetch_bot_fills_as_trades(
           AND matched_size IS NOT NULL
           {where_time}
       ),
+      fill_order_ids AS (
+        SELECT DISTINCT order_id
+        FROM fills
+        WHERE delta_size > 0
+      ),
       mapping AS (
         SELECT
           order_id,
@@ -182,7 +187,7 @@ def _fetch_bot_fills_as_trades(
           AND sgo.market_slug != ''
           AND ({SERIES_WHERE})
           {run_where}
-          {where_time}
+          AND order_id IN (SELECT order_id FROM fill_order_ids)
         GROUP BY order_id
       )
     SELECT
@@ -252,7 +257,7 @@ def _match_one_bucket(
     *,
     max_delta_ms: int,
     price_eps: float,
-) -> Tuple[int, int, List[float], Dict[str, int]]:
+) -> Tuple[int, int, List[float], List[float], Dict[str, int]]:
     """
     Two-pointer greedy match within a single key bucket (market/outcome/side).
     Returns: (matched_gab, matched_sim, abs_deltas_ms, reasons)
@@ -262,6 +267,7 @@ def _match_one_bucket(
 
     matched_sim = [False] * len(sim_sorted)
     abs_deltas: List[float] = []
+    signed_deltas: List[float] = []
     reasons: Dict[str, int] = {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0}
 
     j = 0
@@ -319,6 +325,9 @@ def _match_one_bucket(
             matched_g += 1
             matched_s += 1
             abs_deltas.append(float(best_delta or 0))
+            s_ts = _parse_dt64(sim_sorted[best_idx]["ts"])
+            s_ms = int(s_ts.timestamp() * 1000)
+            signed_deltas.append(float(s_ms - g_ms))
         else:
             if not scanned_any:
                 reasons["NO_SIM"] += 1
@@ -327,7 +336,7 @@ def _match_one_bucket(
             else:
                 reasons["NO_TIME_MATCH"] += 1
 
-    return matched_g, matched_s, abs_deltas, reasons
+    return matched_g, matched_s, abs_deltas, signed_deltas, reasons
 
 
 def main() -> int:
@@ -415,11 +424,13 @@ def main() -> int:
     matched_g_total = 0
     matched_s_total = 0
     abs_deltas: List[float] = []
+    signed_deltas: List[float] = []
     reasons_total: Dict[str, int] = {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0}
 
     matched_g_by_series: Dict[str, int] = {}
     matched_s_by_series: Dict[str, int] = {}
     deltas_by_series: Dict[str, List[float]] = {}
+    signed_deltas_by_series: Dict[str, List[float]] = {}
     reasons_by_series: Dict[str, Dict[str, int]] = {}
 
     matched_g_by_market: Dict[str, int] = {}
@@ -439,16 +450,18 @@ def main() -> int:
             reasons_by_series.setdefault(series, {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0})["NO_SIM"] += len(g)
             reasons_by_market.setdefault(market, {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0})["NO_SIM"] += len(g)
             continue
-        mg, ms, deltas, reasons = _match_one_bucket(g, s, max_delta_ms=args.max_delta_ms, price_eps=args.price_eps)
+        mg, ms, deltas, s_deltas, reasons = _match_one_bucket(g, s, max_delta_ms=args.max_delta_ms, price_eps=args.price_eps)
         matched_g_total += mg
         matched_s_total += ms
         abs_deltas.extend(deltas)
+        signed_deltas.extend(s_deltas)
 
         market = k[0]
         series = _series_from_slug(market)
         matched_g_by_series[series] = matched_g_by_series.get(series, 0) + mg
         matched_s_by_series[series] = matched_s_by_series.get(series, 0) + ms
         deltas_by_series.setdefault(series, []).extend(deltas)
+        signed_deltas_by_series.setdefault(series, []).extend(s_deltas)
         rb = reasons_by_series.setdefault(series, {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0})
         for rk, rv in reasons.items():
             rb[rk] = rb.get(rk, 0) + rv
@@ -469,6 +482,14 @@ def main() -> int:
     print(f"- recall (gab matched): {matched_g_total:,}/{len(gab_rows):,} = {recall*100:.2f}%")
     print(f"- precision (sim matched): {matched_s_total:,}/{len(sim_rows):,} = {precision*100:.2f}%")
     print(f"- abs time delta ms: median={_median(abs_deltas):.1f} p90={_quantile(abs_deltas, 0.9):.1f} n={len(abs_deltas):,}")
+    if signed_deltas:
+        early = sum(1 for d in signed_deltas if d <= 0)
+        late = len(signed_deltas) - early
+        print(
+            f"- signed delta ms (sim - gab): median={_median(signed_deltas):.1f} "
+            f"p10={_quantile(signed_deltas, 0.1):.1f} p90={_quantile(signed_deltas, 0.9):.1f} "
+            f"early={early} late={late}"
+        )
     print(f"- mismatch reasons: {reasons_total}")
 
     if args.by_series:
@@ -484,11 +505,19 @@ def main() -> int:
             r = (mg / gab_n * 100.0) if gab_n else 0.0
             p = (ms / sim_n * 100.0) if sim_n else 0.0
             deltas = deltas_by_series.get(series, [])
+            s_deltas = signed_deltas_by_series.get(series, [])
             rs = reasons_by_series.get(series, {"NO_SIM": 0, "NO_PRICE_MATCH": 0, "NO_TIME_MATCH": 0})
             print(
                 f"{series:8} {gab_n:6} {sim_n:6} {mg:9} {ms:9} {r:7.2f} {p:6.2f} "
                 f"{_median(deltas):12.1f} {_quantile(deltas, 0.9):9.1f} {rs.get('NO_SIM',0):6} {rs.get('NO_PRICE_MATCH',0):8}"
             )
+            if s_deltas:
+                early = sum(1 for d in s_deltas if d <= 0)
+                late = len(s_deltas) - early
+                print(
+                    f"         signed_dt_ms: median={_median(s_deltas):.1f} p10={_quantile(s_deltas, 0.1):.1f} "
+                    f"p90={_quantile(s_deltas, 0.9):.1f} early={early} late={late}"
+                )
 
     if args.top_markets and args.top_markets > 0:
         print(f"\n**Top Markets (by gab volume, n={args.top_markets})**")

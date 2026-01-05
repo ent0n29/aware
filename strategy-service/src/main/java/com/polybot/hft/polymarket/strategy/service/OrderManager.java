@@ -149,6 +149,11 @@ public class OrderManager {
         boolean samePrice = existing.price() != null && existing.price().compareTo(newPrice) == 0;
         boolean sameSize = existing.size() != null && existing.size().compareTo(newSize) == 0;
         if (samePrice && sameSize) {
+            if (cfg.forceReplaceMillis() > 0 && ageMillis >= cfg.forceReplaceMillis()) {
+                safeCancel(existing, CancelReason.REPLACE_REFRESH, secondsToEnd, book, otherBook);
+                ordersByTokenId.remove(tokenId);
+                return ReplaceDecision.REPLACE; // Refresh queue priority
+            }
             return ReplaceDecision.SKIP; // No change needed
         }
 
@@ -227,6 +232,12 @@ public class OrderManager {
         try {
             order = executorApi.getOrder(state.orderId());
         } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.contains("HTTP 404")) {
+                log.warn("GABAGOOL: Order {} not found on executor; dropping cached state", state.orderId());
+                ordersByTokenId.remove(tokenId);
+                return;
+            }
             ordersByTokenId.put(tokenId, new OrderState(
                     state.orderId(), state.market(), state.tokenId(), state.direction(),
                     state.price(), state.size(), state.placedAt(), state.matchedSize(),
@@ -373,8 +384,10 @@ public class OrderManager {
     }
 
     public enum CancelReason {
-        BOOK_STALE, OUTSIDE_TIME_WINDOW, OUTSIDE_LIFETIME,
+        BOOK_STALE, BOOK_OUT_OF_BAND, OUTSIDE_TIME_WINDOW, OUTSIDE_LIFETIME,
         REPLACE_PRICE, REPLACE_SIZE, REPLACE_PRICE_AND_SIZE,
-        STALE_TIMEOUT, SHUTDOWN, INSUFFICIENT_EDGE
+        REPLACE_REFRESH,
+        STALE_TIMEOUT, SHUTDOWN, INSUFFICIENT_EDGE,
+        HEDGE_DELAY
     }
 }

@@ -17,7 +17,7 @@ ingestor:
     password: ""
     timeout-seconds: 10
   polymarket:
-    username: ${POLYMARKET_TARGET_USER:}
+    username: gabagool22
   polling:
     enabled: true
     backfill-on-start: false
@@ -55,3 +55,13 @@ ingestor:
     request-delay-millis: 100
     max-tracked-markets: 500
     on-trade-context-max-age-seconds: 300
+
+  # AWARE Fund - Global Trades Ingestion
+  # Ingests ALL Polymarket trades for Smart Money Index
+  global-trades:
+    enabled: true
+    poll-interval-seconds: 30
+    page-size: 500
+    request-delay-millis: 100
+    backfill-on-start: false
+    backfill-max-pages: 100

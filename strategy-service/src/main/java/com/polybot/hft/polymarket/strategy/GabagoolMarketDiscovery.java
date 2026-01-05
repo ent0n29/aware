@@ -3,6 +3,7 @@ package com.polybot.hft.polymarket.strategy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.polybot.hft.config.HftProperties;
+import com.polybot.hft.polymarket.discovery.PolymarketMarketDiscoveryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -46,6 +47,7 @@ public class GabagoolMarketDiscovery {
     private final HftProperties properties;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final PolymarketMarketDiscoveryService marketDiscoveryService;
 
     private final List<DiscoveredMarket> activeMarkets = new CopyOnWriteArrayList<>();
 
@@ -82,25 +84,28 @@ public class GabagoolMarketDiscovery {
             Instant maxEnd = now.plus(2, ChronoUnit.HOURS);
 
             List<DiscoveredMarket> active = discovered.stream()
-                    .filter(m -> m.endTime() != null)
-                    .filter(m -> m.endTime().isAfter(now))
-                    .filter(m -> m.endTime().isBefore(maxEnd))
-                    .filter(m -> {
-                        // Avoid tracking future market instances that haven't started trading yet.
-                        Duration duration = "updown-15m".equals(m.marketType()) ? Duration.ofMinutes(15) : Duration.ofHours(1);
-                        Instant startTime = m.endTime().minus(duration);
-                        return !now.isBefore(startTime);
-                    })
-                    .filter(m -> !m.closed())
+                    .filter(m -> isActiveNow(m, now, maxEnd))
                     .toList();
 
+            // Merge with previous markets to avoid coverage drops on transient API failures.
+            List<DiscoveredMarket> previous = new ArrayList<>(activeMarkets);
+            Map<String, DiscoveredMarket> merged = new LinkedHashMap<>();
+            for (DiscoveredMarket m : active) {
+                merged.put(m.slug(), m);
+            }
+            for (DiscoveredMarket m : previous) {
+                if (!merged.containsKey(m.slug()) && isActiveNow(m, now, maxEnd)) {
+                    merged.put(m.slug(), m);
+                }
+            }
+
             activeMarkets.clear();
-            activeMarkets.addAll(active);
+            activeMarkets.addAll(merged.values());
 
-            log.info("GABAGOOL DISCOVERY: Found {} total, {} active/open", discovered.size(), active.size());
+            log.info("GABAGOOL DISCOVERY: Found {} total, {} active/open", discovered.size(), merged.size());
 
-            if (!active.isEmpty()) {
-                for (DiscoveredMarket m : active) {
+            if (!merged.isEmpty()) {
+                for (DiscoveredMarket m : merged.values()) {
                     long minutesToEnd = Duration.between(now, m.endTime()).toMinutes();
                     log.info("  - {} [{}] (ends in {}min)", m.slug(), m.marketType(), minutesToEnd);
                 }
@@ -143,18 +148,86 @@ public class GabagoolMarketDiscovery {
             }
         }
 
+        // Secondary discovery: gamma/clob search (best-effort).
+        // This improves coverage when deterministic slug generation misses due to format changes.
+        try {
+            List<String> queries = List.of(
+                    "btc updown 15m",
+                    "btc up or down 15m",
+                    "eth updown 15m",
+                    "eth up or down 15m",
+                    "bitcoin up or down",
+                    "ethereum up or down"
+            );
+
+            for (String q : queries) {
+                List<com.polybot.hft.polymarket.discovery.DiscoveredMarket> found = marketDiscoveryService.searchGamma(q);
+                for (com.polybot.hft.polymarket.discovery.DiscoveredMarket m : found) {
+                    DiscoveredMarket mapped = mapCoreDiscoveredMarket(m);
+                    if (mapped != null && seenSlugs.add(mapped.slug())) {
+                        markets.add(mapped);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("GABAGOOL DISCOVERY: secondary discovery failed: {}", e.getMessage());
+        }
+
         if (log.isDebugEnabled()) {
             log.debug("GABAGOOL DISCOVERY: Candidates: {}", candidates);
         }
         return markets;
     }
 
+    private DiscoveredMarket mapCoreDiscoveredMarket(com.polybot.hft.polymarket.discovery.DiscoveredMarket m) {
+        if (m == null) {
+            return null;
+        }
+        String slug = m.slug();
+        if (slug == null || slug.isBlank()) {
+            return null;
+        }
+
+        String marketType;
+        if (slug.contains("updown-15m")) {
+            marketType = "updown-15m";
+        } else if (slug.contains("up-or-down")) {
+            marketType = "up-or-down";
+        } else {
+            return null;
+        }
+
+        String upTokenId = m.yesTokenId();
+        String downTokenId = m.noTokenId();
+        if (upTokenId == null || upTokenId.isBlank() || downTokenId == null || downTokenId.isBlank()) {
+            return null;
+        }
+
+        Instant endTime = null;
+        if (m.endEpochMillis() != null && m.endEpochMillis() > 0) {
+            endTime = Instant.ofEpochMilli(m.endEpochMillis());
+        }
+        if (endTime == null) {
+            endTime = parseEndTimeFromSlug(slug, marketType);
+        }
+
+        return new DiscoveredMarket(
+                slug,
+                m.id(),
+                upTokenId,
+                downTokenId,
+                endTime,
+                false,
+                marketType
+        );
+    }
+
     private static List<String> candidateUpDown15mSlugs(String assetPrefix, Instant now) {
         long nowSec = now.getEpochSecond();
-        // Include current + previous interval, plus a small lookahead, so we always
-        // cover the active 15m market even if it's near the end of its lifecycle.
-        long from = nowSec - Duration.ofMinutes(30).toSeconds();
-        long to = nowSec + Duration.ofMinutes(15).toSeconds();
+        // Include a wider window so we keep coverage through restarts and transient API failures.
+        // This remains small (15m cadence) but dramatically reduces the chance we miss an active instance.
+        long from = nowSec - Duration.ofMinutes(90).toSeconds();
+        long to = nowSec + Duration.ofMinutes(60).toSeconds();
 
         long startFrom = (from / 900L) * 900L;
         long startTo = (to / 900L) * 900L;
@@ -173,7 +246,8 @@ public class GabagoolMarketDiscovery {
                 hourStart.minusHours(2),
                 hourStart.minusHours(1),
                 hourStart,
-                hourStart.plusHours(1)
+                hourStart.plusHours(1),
+                hourStart.plusHours(2)
         );
         List<String> out = new ArrayList<>(candidates.size());
         for (ZonedDateTime start : candidates) {
@@ -192,6 +266,20 @@ public class GabagoolMarketDiscovery {
         }
         String ampm = hour24 < 12 ? "am" : "pm";
         return "%s-up-or-down-%s-%d-%d%s-et".formatted(assetPrefix, month, day, hour12, ampm);
+    }
+
+    private static boolean isActiveNow(DiscoveredMarket market, Instant now, Instant maxEnd) {
+        if (market == null || market.endTime() == null || market.closed()) {
+            return false;
+        }
+        if (market.endTime().isBefore(now) || market.endTime().isAfter(maxEnd)) {
+            return false;
+        }
+        Duration duration = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(15) : Duration.ofHours(1);
+        Instant startTime = market.endTime().minus(duration);
+        // Pre-warm a little before the market "start" so WS TOB is hot at the first decision tick.
+        Duration prewarm = "updown-15m".equals(market.marketType()) ? Duration.ofSeconds(90) : Duration.ofMinutes(3);
+        return !now.isBefore(startTime.minus(prewarm));
     }
 
     /**

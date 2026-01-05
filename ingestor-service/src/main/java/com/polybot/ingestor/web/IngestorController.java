@@ -4,15 +4,19 @@ import com.polybot.hft.events.HftEventsProperties;
 import com.polybot.hft.polymarket.ws.ClobMarketWebSocketClient;
 import com.polybot.ingestor.config.IngestorProperties;
 import com.polybot.ingestor.config.MarketWsProperties;
+import com.polybot.ingestor.ingest.PolymarketGlobalTradesIngestor;
 import com.polybot.ingestor.ingest.PolymarketMarketContextIngestor;
 import com.polybot.ingestor.ingest.PolymarketUpDownMarketWsIngestor;
 import com.polybot.ingestor.ingest.PolymarketUserIngestor;
 import com.polybot.ingestor.ingest.PolygonTxReceiptIngestor;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/ingestor")
@@ -28,6 +32,9 @@ public class IngestorController {
   private final PolymarketUpDownMarketWsIngestor marketWsIngestor;
   private final ClobMarketWebSocketClient marketWsClient;
   private final PolygonTxReceiptIngestor polygonTxReceipts;
+
+  @Autowired(required = false)
+  private PolymarketGlobalTradesIngestor globalTradesIngestor;
 
   @GetMapping("/status")
   public Status status() {
@@ -77,9 +84,40 @@ public class IngestorController {
         polygonTxReceipts.queuedTxCount(),
         polygonTxReceipts.inFlightTxCount(),
         polygonTxReceipts.receiptWorkers(),
-        polygonTxReceipts.blockTimestampCacheSize()
+        polygonTxReceipts.blockTimestampCacheSize(),
+        globalTradesStatus()
     );
   }
+
+  @GetMapping("/aware/status")
+  public AwareStatus awareStatus() {
+    return globalTradesStatus();
+  }
+
+  private AwareStatus globalTradesStatus() {
+    if (globalTradesIngestor == null) {
+      return new AwareStatus(false, 0, 0, 0, 0, 0, 0);
+    }
+    return new AwareStatus(
+        true,
+        globalTradesIngestor.polls(),
+        globalTradesIngestor.publishedTrades(),
+        globalTradesIngestor.skippedTrades(),
+        globalTradesIngestor.failures(),
+        globalTradesIngestor.lastPollAtMillis(),
+        globalTradesIngestor.seenTradeIdsSize()
+    );
+  }
+
+  public record AwareStatus(
+      boolean enabled,
+      long polls,
+      long publishedTrades,
+      long skippedTrades,
+      long failures,
+      long lastPollAtMillis,
+      int seenTradeIdsSize
+  ) {}
 
   public record Status(
       String app,
@@ -127,7 +165,8 @@ public class IngestorController {
       int polygonTxQueuedCount,
       int polygonTxInFlightCount,
       int polygonTxReceiptWorkers,
-      int polygonTxBlockTimestampCacheSize
+      int polygonTxBlockTimestampCacheSize,
+      AwareStatus awareGlobalTrades
   ) {
   }
 }

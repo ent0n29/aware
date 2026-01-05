@@ -111,6 +111,18 @@ def main() -> int:
     df = ch.query_df(
         f"""
         WITH
+          fills AS (
+            SELECT
+              order_id,
+              minIf(ts, matched_size > 0) AS first_fill_ts,
+              argMinIf(matched_size, ts, matched_size > 0) AS first_matched_size,
+              max(requested_size) AS requested_size
+            FROM polybot.executor_order_status
+            WHERE order_id != ''
+              {where_s}
+            GROUP BY order_id
+            HAVING max(ifNull(matched_size, 0)) > 0
+          ),
           placed AS (
             SELECT
               order_id,
@@ -124,20 +136,8 @@ def main() -> int:
             FROM polybot.strategy_gabagool_orders
             WHERE order_id != ''
               {run_where}
-              {where_s}
+              AND order_id IN (SELECT order_id FROM fills)
             GROUP BY order_id
-          ),
-          fills AS (
-            SELECT
-              order_id,
-              minIf(ts, matched_size > 0) AS first_fill_ts,
-              argMinIf(matched_size, ts, matched_size > 0) AS first_matched_size,
-              max(requested_size) AS requested_size
-            FROM polybot.executor_order_status
-            WHERE order_id != ''
-              {where_s}
-            GROUP BY order_id
-            HAVING max(ifNull(matched_size, 0)) > 0
           )
         SELECT
           p.order_id,
@@ -219,6 +219,25 @@ def main() -> int:
     frac = frac[(frac > 0) & (frac <= 1.0)]
     frac_median = float(frac.median()) if not frac.empty else float("nan")
 
+    # Estimate queue-factor variance range from the dispersion of first-fill latency at the best bid (k=0).
+    #
+    # Our simulator samples a per-order queueFactor and multiplies the base fill probability by that factor.
+    # If we're too "deterministic" (all orders fill at similar times), we can widen this range; if we're too
+    # noisy, tighten it. This is a lightweight proxy that avoids needing a full queue simulation here.
+    queue_factor_min = float("nan")
+    queue_factor_max = float("nan")
+    k0 = df[df["ticks_above_best_bid"] == 0].copy()
+    if not k0.empty and len(k0) >= int(args.min_samples):
+        q10_ms = float(k0["fill_latency_ms"].quantile(0.10))
+        q50_ms = float(k0["fill_latency_ms"].quantile(0.50))
+        q90_ms = float(k0["fill_latency_ms"].quantile(0.90))
+        p10 = _geometric_p_from_median_latency(q10_ms, args.fill_poll_millis)
+        p50 = _geometric_p_from_median_latency(q50_ms, args.fill_poll_millis)
+        p90 = _geometric_p_from_median_latency(q90_ms, args.fill_poll_millis)
+        if p50 > 0:
+            queue_factor_min = max(0.1, min(5.0, p90 / p50))
+            queue_factor_max = max(0.1, min(5.0, p10 / p50))
+
     print("\n**Calibration Summary**")
     print(f"- maker sample orders: {len(df):,}")
     print(f"- tick buckets used (>= {args.min_samples} samples): {len(per_k)}")
@@ -233,6 +252,11 @@ def main() -> int:
         print(f"  maker-fill-fraction-of-remaining: {frac_median:.4f}")
     else:
         print("  maker-fill-fraction-of-remaining: (unable to estimate; keep current)")
+    if math.isfinite(queue_factor_min) and math.isfinite(queue_factor_max):
+        print(f"  maker-queue-factor-min: {queue_factor_min:.3f}")
+        print(f"  maker-queue-factor-max: {queue_factor_max:.3f}")
+    else:
+        print("  maker-queue-factor-min/max: (unable to estimate; keep current)")
 
     print("\nYAML snippet:")
     print("executor:")
@@ -242,6 +266,9 @@ def main() -> int:
     print(f"    maker-fill-probability-max-per-poll: {p_max:.4f}")
     if math.isfinite(frac_median):
         print(f"    maker-fill-fraction-of-remaining: {frac_median:.4f}")
+    if math.isfinite(queue_factor_min) and math.isfinite(queue_factor_max):
+        print(f"    maker-queue-factor-min: {queue_factor_min:.3f}")
+        print(f"    maker-queue-factor-max: {queue_factor_max:.3f}")
     return 0
 
 

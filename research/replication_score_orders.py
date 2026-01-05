@@ -189,11 +189,11 @@ class TradeSource:
 
 def _pick_trade_source(client) -> TradeSource:
     tables = client.show_tables()
-    # Prefer lightweight deduped trades to avoid memory blowups on enriched views.
-    for t in ("user_trades_dedup", "user_trade_enriched_v4", "user_trade_enriched_v3", "user_trade_enriched_v2", "user_trade_research"):
+    # Prefer a time-filterable MergeTree table to avoid global GROUP BY/OOM issues.
+    for t in ("user_trades", "user_trades_dedup", "user_trade_enriched_v4", "user_trade_enriched_v3", "user_trade_enriched_v2", "user_trade_research"):
         if t in tables:
             return TradeSource(t)
-    raise RuntimeError("No trade source found (expected user_trades_dedup or user_trade_enriched_v2/v3/v4 or user_trade_research)")
+    raise RuntimeError("No trade source found (expected user_trades/user_trades_dedup or user_trade_enriched_v2/v3/v4 or user_trade_research)")
 
 
 def fetch_gabagool_trades(client, source: TradeSource, username: str, where_time: str) -> pd.DataFrame:
@@ -255,7 +255,6 @@ def fetch_filled_orders(client, where_time: str, run_id: Optional[str]) -> pd.Da
             FROM polybot.strategy_gabagool_orders
             WHERE order_id != ''
               AND run_id = '{run_id}'
-              {where_time}
           )
         """
     q = f"""

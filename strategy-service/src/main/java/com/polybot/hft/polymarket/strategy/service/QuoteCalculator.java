@@ -35,6 +35,10 @@ public class QuoteCalculator {
         BigDecimal bestAsk = book.bestAsk();
 
         if (bestBid == null || bestAsk == null) return null;
+        if (tickSize == null || tickSize.compareTo(BigDecimal.ZERO) <= 0) return null;
+
+        BigDecimal minPrice = tickSize;
+        BigDecimal maxPrice = BigDecimal.ONE.subtract(tickSize);
 
         BigDecimal mid = bestBid.add(bestAsk).divide(BigDecimal.valueOf(2), 4, RoundingMode.HALF_UP);
         BigDecimal spread = bestAsk.subtract(bestBid);
@@ -48,17 +52,19 @@ public class QuoteCalculator {
         } else {
             // Tight/normal book - improve bid
             BigDecimal improvedBid = bestBid.add(tickSize.multiply(BigDecimal.valueOf(effectiveImproveTicks)));
-            entryPrice = improvedBid.min(mid);
+            // Allow quoting inside the spread up to (bestAsk - 1 tick). Gabagool22 frequently
+            // posts inside-spread bids (e.g., bid+1/bid+2) when spread is 2-4 ticks.
+            entryPrice = improvedBid;
         }
 
         entryPrice = roundToTick(entryPrice, tickSize, RoundingMode.DOWN);
 
         // Sanity checks
-        if (entryPrice.compareTo(BigDecimal.valueOf(0.01)) < 0) return null;
-        if (entryPrice.compareTo(BigDecimal.valueOf(0.99)) > 0) return null;
+        if (entryPrice.compareTo(minPrice) < 0) return null;
+        if (entryPrice.compareTo(maxPrice) > 0) return null;
         if (entryPrice.compareTo(bestAsk) >= 0) {
             entryPrice = bestAsk.subtract(tickSize);
-            if (entryPrice.compareTo(BigDecimal.valueOf(0.01)) < 0) return null;
+            if (entryPrice.compareTo(minPrice) < 0) return null;
         }
 
         return entryPrice;
@@ -69,6 +75,11 @@ public class QuoteCalculator {
      */
     public BigDecimal calculateShares(GabagoolMarket market, BigDecimal entryPrice, GabagoolConfig cfg,
                                        long secondsToEnd, BigDecimal currentExposure) {
+        return calculateShares(market, entryPrice, cfg, secondsToEnd, currentExposure, 1.0);
+    }
+
+    public BigDecimal calculateShares(GabagoolMarket market, BigDecimal entryPrice, GabagoolConfig cfg,
+                                       long secondsToEnd, BigDecimal currentExposure, double sizeFactor) {
         BigDecimal shares = replicaSharesByTimeToEnd(market, secondsToEnd);
         if (shares == null) {
             BigDecimal notional = calculateNotional(cfg, currentExposure);
@@ -79,6 +90,11 @@ public class QuoteCalculator {
 
         // Dynamic sizing
         shares = shares.multiply(bankrollService.getDynamicSizingMultiplier(cfg));
+
+        if (sizeFactor <= 0) return null;
+        if (sizeFactor != 1.0) {
+            shares = shares.multiply(BigDecimal.valueOf(sizeFactor));
+        }
 
         // Apply caps
         BigDecimal bankrollUsd = bankrollService.resolveEffective(cfg);
@@ -169,7 +185,10 @@ public class QuoteCalculator {
     public boolean hasMinimumEdge(BigDecimal upPrice, BigDecimal downPrice, GabagoolConfig cfg) {
         BigDecimal cost = upPrice.add(downPrice);
         BigDecimal edge = BigDecimal.ONE.subtract(cost);
-        return edge.compareTo(BigDecimal.valueOf(cfg.completeSetMinEdge())) >= 0;
+        BigDecimal minEdge = BigDecimal.valueOf(cfg.completeSetMinEdge());
+        // Tiny epsilon to avoid floating-point rounding rejecting 1% edges.
+        BigDecimal edgeEps = BigDecimal.valueOf(0.000001);
+        return edge.add(edgeEps).compareTo(minEdge) >= 0;
     }
 
     private BigDecimal calculateNotional(GabagoolConfig cfg, BigDecimal currentExposure) {

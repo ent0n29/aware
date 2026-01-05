@@ -18,7 +18,8 @@ public record HftProperties(
     @Valid Polymarket polymarket,
     @Valid Executor executor,
     @Valid Risk risk,
-    @Valid Strategy strategy
+    @Valid Strategy strategy,
+    @Valid Fund fund
 ) {
 
   public HftProperties {
@@ -36,6 +37,9 @@ public record HftProperties(
     }
     if (strategy == null) {
       strategy = defaultStrategy();
+    }
+    if (fund == null) {
+      fund = defaultFund();
     }
   }
 
@@ -300,41 +304,49 @@ public record HftProperties(
 
   private static Gabagool defaultGabagool() {
     return new Gabagool(
-        false,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null, // bankrollSmoothingAlpha
-        null, // bankrollMinThreshold
-        null, // bankrollTradingFraction
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
+        false, // enabled
+        null,  // refreshMillis
+        null,  // minReplaceMillis
+        null,  // forceReplaceMillis
+        null,  // minSecondsToEnd
+        null,  // maxSecondsToEnd
+        null,  // quoteSize
+        null,  // quoteSizeBankrollFraction
+        null,  // improveTicks
+        null,  // bankrollUsd
+        null,  // bankrollMode
+        null,  // bankrollRefreshMillis
+        null,  // dynamicSizingEnabled
+        null,  // dynamicSizingMinMultiplier
+        null,  // dynamicSizingMaxMultiplier
+        null,  // bankrollSmoothingAlpha
+        null,  // bankrollMinThreshold
+        null,  // bankrollTradingFraction
+        null,  // maxOrderBankrollFraction
+        null,  // maxTotalBankrollFraction
+        null,  // completeSetMinEdge
+        null,  // completeSetCancelEdge
+        null,  // completeSetMaxSkewTicks
+        null,  // completeSetImbalanceSharesForMaxSkew
+        null,  // completeSetTopUpEnabled
+        null,  // completeSetTopUpSecondsToEnd
+        null,  // completeSetTopUpMinShares
+        null,  // completeSetFastTopUpEnabled
+        null,  // completeSetFastTopUpMinShares
+        null,  // completeSetFastTopUpMinSecondsAfterFill
+        null,  // completeSetFastTopUpMaxSecondsAfterFill
+        null,  // completeSetFastTopUpCooldownMillis
+        null,  // completeSetFastTopUpMinEdge
+        null,  // completeSetFastTopUpFraction
+        null,  // completeSetFastTopUpProbability
+        null,  // completeSetHedgeDelayEnabled
+        null,  // completeSetHedgeDelayMinSeconds
+        null,  // completeSetHedgeDelayMaxSeconds
+        null,  // takerModeEnabled
+        null,  // takerModeMaxEdge
+        null,  // takerModeMaxSpread
+        null,  // takerModeProbability
+        null   // markets
     );
   }
 
@@ -350,6 +362,11 @@ public record HftProperties(
        * Helps avoid spam when the WS book is noisy.
        */
       @NotNull @Min(0) Long minReplaceMillis,
+      /**
+       * Force cancel/replace even when price/size are unchanged to refresh queue priority.
+       * When 0, forced refresh is disabled.
+       */
+      @NotNull @Min(0) Long forceReplaceMillis,
       @NotNull @Min(0) Long minSecondsToEnd,
       @NotNull @Min(0) Long maxSecondsToEnd,
       /**
@@ -427,6 +444,11 @@ public record HftProperties(
        */
       @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetMinEdge,
       /**
+       * Cancel threshold for complete-set edge hysteresis. When edge falls below this,
+       * existing orders are canceled. When between cancel and min edge, we hold but do not place new quotes.
+       */
+      @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetCancelEdge,
+      /**
        * Maximum inventory skew (in ticks) applied to one leg and subtracted from the other.
        */
       @NotNull @Min(0) Integer completeSetMaxSkewTicks,
@@ -476,8 +498,36 @@ public record HftProperties(
       /**
        * Minimum estimated hedged edge required for a fast top-up (edge = 1 - (leadFillPrice + laggingAsk)).
        * Use 0.0 for breakeven-or-better hedging.
+       *
+       * Note: The target user sometimes performs taker-like hedges even at negative edge (inventory cleanup),
+       * so this value may be configured < 0.0 when calibrating to observed behavior.
        */
-      @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetFastTopUpMinEdge,
+      @NotNull @jakarta.validation.constraints.DecimalMin("-1.0")
+      @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetFastTopUpMinEdge,
+      /**
+       * Fraction (0..1) of current per-market share imbalance to hedge during fast top-up.
+       * 1.0 fully hedges; < 1.0 leaves residual imbalance (closer to target behavior).
+       */
+      @NotNull @jakarta.validation.constraints.DecimalMin("0.0")
+      @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetFastTopUpFraction,
+      /**
+       * Probability (0..1) of attempting a fast top-up for a given lead fill.
+       * Less than 1.0 introduces long-tail lead→lag delays (target shows non-trivial 60–120s tails).
+       */
+      @NotNull @jakarta.validation.constraints.DecimalMin("0.0")
+      @jakarta.validation.constraints.DecimalMax("1.0") Double completeSetFastTopUpProbability,
+      /**
+       * When enabled, delay quoting the lagging leg after a lead fill to better match observed lead→lag timing.
+       */
+      @NotNull Boolean completeSetHedgeDelayEnabled,
+      /**
+       * Minimum seconds to hold the lagging leg after a lead fill.
+       */
+      @NotNull @Min(0) Long completeSetHedgeDelayMinSeconds,
+      /**
+       * Maximum seconds to hold the lagging leg after a lead fill.
+       */
+      @NotNull @Min(0) Long completeSetHedgeDelayMaxSeconds,
       /**
        * Enable taker mode for aggressive order placement.
        * When enabled, the strategy will sometimes cross the spread (buy at ask) instead of posting at bid.
@@ -490,20 +540,29 @@ public record HftProperties(
        * Empirical: gabagool takes more often when edge is low (<1.5%).
        */
       @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double takerModeMaxEdge,
-      /**
-       * Maximum spread (in price units) to consider for taker orders.
-       * Only take when spread cost is acceptable.
-       * Typical: 0.02 (2 ticks) means spread cost of 2 cents per share.
-       */
-      @NotNull @PositiveOrZero BigDecimal takerModeMaxSpread,
-      @Valid List<GabagoolMarket> markets
-  ) {
+      /**                                                                                                                    
+       * Maximum spread (in price units) to consider for taker orders.                                                       
+       * Only take when spread cost is acceptable.                                                                           
+       * Typical: 0.02 (2 ticks) means spread cost of 2 cents per share.                                                     
+       */                                                                                                                    
+      @NotNull @PositiveOrZero BigDecimal takerModeMaxSpread,                                                                
+      /**                                                                                                                    
+       * Probability (0..1) of taking when taker conditions are met.                                                        
+       * Use to match observed taker/maker mix without changing edge thresholds.                                            
+       */                                                                                                                    
+      @NotNull @jakarta.validation.constraints.DecimalMin("0.0")                                                           
+      @jakarta.validation.constraints.DecimalMax("1.0") Double takerModeProbability,                                      
+      @Valid List<GabagoolMarket> markets                                                                                    
+  ) {                                                                                                                        
     public Gabagool {
       if (refreshMillis == null) {
         refreshMillis = 250L;
       }
       if (minReplaceMillis == null) {
         minReplaceMillis = 1_000L;
+      }
+      if (forceReplaceMillis == null) {
+        forceReplaceMillis = 0L;
       }
       if (minSecondsToEnd == null) {
         minSecondsToEnd = 0L;
@@ -556,6 +615,9 @@ public record HftProperties(
       if (completeSetMinEdge == null) {
         completeSetMinEdge = 0.01;
       }
+      if (completeSetCancelEdge == null) {
+        completeSetCancelEdge = Math.max(0.0, completeSetMinEdge - 0.003);
+      }
       if (completeSetMaxSkewTicks == null) {
         completeSetMaxSkewTicks = 2;
       }
@@ -589,18 +651,39 @@ public record HftProperties(
       if (completeSetFastTopUpMinEdge == null) {
         completeSetFastTopUpMinEdge = 0.0;
       }
+      if (completeSetFastTopUpFraction == null) {
+        completeSetFastTopUpFraction = 1.0;
+      }
+      if (completeSetFastTopUpProbability == null) {
+        completeSetFastTopUpProbability = 1.0;
+      }
+      if (completeSetHedgeDelayEnabled == null) {
+        completeSetHedgeDelayEnabled = true;
+      }
+      if (completeSetHedgeDelayMinSeconds == null) {
+        completeSetHedgeDelayMinSeconds = 2L;
+      }
+      if (completeSetHedgeDelayMaxSeconds == null) {
+        completeSetHedgeDelayMaxSeconds = 30L;
+      }
+      if (completeSetHedgeDelayMaxSeconds < completeSetHedgeDelayMinSeconds) {
+        completeSetHedgeDelayMaxSeconds = completeSetHedgeDelayMinSeconds;
+      }
       if (takerModeEnabled == null) {
         takerModeEnabled = false;  // Disabled by default - target user's taker fills come from FAST_TOP_UP, not explicit taker mode
       }
       if (takerModeMaxEdge == null) {
         takerModeMaxEdge = 0.015;  // Take when edge < 1.5% (low edge = fleeting opportunity)
       }
-      if (takerModeMaxSpread == null) {
-        takerModeMaxSpread = BigDecimal.valueOf(0.02);  // Max 2 ticks spread cost
-      }
-      markets = sanitizeGabagoolMarkets(markets);
-    }
-  }
+      if (takerModeMaxSpread == null) {                                                                                      
+        takerModeMaxSpread = BigDecimal.valueOf(0.02);  // Max 2 ticks spread cost                                           
+      }                                                                                                                      
+      if (takerModeProbability == null) {                                                                                    
+        takerModeProbability = 1.0;  // Default: always take when conditions are met                                         
+      }                                                                                                                      
+      markets = sanitizeGabagoolMarkets(markets);                                                                            
+    }                                                                                                                        
+  }                                                                                                                          
 
   public record GabagoolMarket(
       String slug,
@@ -620,5 +703,119 @@ public record HftProperties(
         .toList();
   }
 
+  // ============================================================================
+  // FUND CONFIGURATION
+  // ============================================================================
+
+  private static Fund defaultFund() {
+    return new Fund(
+        false,                        // enabled
+        "PSI-10",                     // indexType
+        BigDecimal.valueOf(10000),    // capitalUsd
+        0.10,                         // maxPositionPct
+        BigDecimal.valueOf(5),        // minTradeUsd
+        5,                            // signalDelaySeconds
+        0.02,                         // maxSlippagePct
+        FundExecutionMode.LIMIT_THEN_MARKET,
+        defaultFundRiskLimits()
+    );
+  }
+
+  private static FundRiskLimits defaultFundRiskLimits() {
+    return new FundRiskLimits(
+        BigDecimal.valueOf(500),      // maxDailyLossUsd
+        0.10,                         // maxDrawdownPct
+        50,                           // maxOpenPositions
+        BigDecimal.valueOf(1000),     // maxSingleMarketExposureUsd
+        false                         // killSwitchActive
+    );
+  }
+
+  /**
+   * Fund execution mode for order placement.
+   */
+  public enum FundExecutionMode {
+    LIMIT_ONLY,          // Only place limit orders (may miss fills)
+    LIMIT_THEN_MARKET,   // Try limit first, then market after timeout
+    MARKET_ONLY          // Always use market orders (higher slippage)
+  }
+
+  /**
+   * Fund risk limits.
+   */
+  public record FundRiskLimits(
+      @NotNull @PositiveOrZero BigDecimal maxDailyLossUsd,
+      @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double maxDrawdownPct,
+      @NotNull @Min(1) Integer maxOpenPositions,
+      @NotNull @PositiveOrZero BigDecimal maxSingleMarketExposureUsd,
+      @NotNull Boolean killSwitchActive
+  ) {
+    public FundRiskLimits {
+      if (maxDailyLossUsd == null) {
+        maxDailyLossUsd = BigDecimal.valueOf(500);
+      }
+      if (maxDrawdownPct == null) {
+        maxDrawdownPct = 0.10;
+      }
+      if (maxOpenPositions == null) {
+        maxOpenPositions = 50;
+      }
+      if (maxSingleMarketExposureUsd == null) {
+        maxSingleMarketExposureUsd = BigDecimal.valueOf(1000);
+      }
+      if (killSwitchActive == null) {
+        killSwitchActive = false;
+      }
+    }
+  }
+
+  /**
+   * Fund configuration for AWARE Fund products.
+   *
+   * Supports two fund types:
+   * - PSI-* indices: Mirror top traders' positions (passive)
+   * - ALPHA-*: Run proprietary strategies directly (active)
+   */
+  public record Fund(
+      @NotNull Boolean enabled,
+      @NotNull String indexType,                    // "PSI-10", "PSI-SPORTS", "ALPHA-ARB"
+      @NotNull @PositiveOrZero BigDecimal capitalUsd,
+      @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double maxPositionPct,
+      @NotNull @PositiveOrZero BigDecimal minTradeUsd,
+      @NotNull @Min(0) Integer signalDelaySeconds,  // Delay before mirroring (anti-front-run)
+      @NotNull @PositiveOrZero @jakarta.validation.constraints.DecimalMax("1.0") Double maxSlippagePct,
+      @NotNull FundExecutionMode executionMode,
+      @Valid FundRiskLimits riskLimits
+  ) {
+    public Fund {
+      if (enabled == null) {
+        enabled = false;
+      }
+      if (indexType == null || indexType.isBlank()) {
+        indexType = "PSI-10";
+      }
+      if (capitalUsd == null) {
+        capitalUsd = BigDecimal.valueOf(10000);
+      }
+      if (maxPositionPct == null) {
+        maxPositionPct = 0.10;
+      }
+      if (minTradeUsd == null) {
+        minTradeUsd = BigDecimal.valueOf(5);
+      }
+      if (signalDelaySeconds == null) {
+        signalDelaySeconds = 5;
+      }
+      if (maxSlippagePct == null) {
+        maxSlippagePct = 0.02;
+      }
+      if (executionMode == null) {
+        executionMode = FundExecutionMode.LIMIT_THEN_MARKET;
+      }
+      if (riskLimits == null) {
+        riskLimits = defaultFundRiskLimits();
+      }
+    }
+  }
 
 }

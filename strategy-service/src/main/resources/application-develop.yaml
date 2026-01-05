@@ -1,5 +1,34 @@
+spring:
+  datasource:
+    url: ${CLICKHOUSE_URL:jdbc:clickhouse://localhost:8123/polybot}
+    driver-class-name: ${CLICKHOUSE_DRIVER:com.clickhouse.jdbc.ClickHouseDriver}
+    username: ${CLICKHOUSE_USER:default}
+    password: ${CLICKHOUSE_PASSWORD:}
+
 hft:
   mode: PAPER
+
+  # =============================================================================
+  # AWARE Fund Configuration
+  # =============================================================================
+  # Mirrors positions of top traders in the PSI-10 index
+  fund:
+    enabled: false
+    index-type: PSI-10
+    capital-usd: 10000
+    max-position-pct: 0.10          # Max 10% of capital per position
+    min-trade-usd: 5                # Skip trades smaller than $5
+    rebalance-interval-seconds: 60  # Check for drift every 60s
+    signal-delay-seconds: 5         # Wait 5s after detecting trader trade (anti-front-run)
+    max-slippage-pct: 0.02          # Max 2% slippage on market orders
+    execution-mode: LIMIT_THEN_MARKET
+    risk-limits:
+      max-daily-loss-usd: 500       # Hard stop at $500 daily loss
+      max-drawdown-pct: 0.10        # Max 10% drawdown
+      max-open-positions: 50        # Cap at 50 concurrent positions
+      max-single-market-exposure-usd: 1000
+      kill-switch-active: false
+
   events:
     enabled: true
     market-ws-snapshot-publish-millis: 1000
@@ -7,6 +36,10 @@ hft:
   executor:
     base-url: http://localhost:8080
     send-live-ack: false
+  risk:
+    kill-switch: false
+    max-order-notional-usd: 0
+    max-order-size: 30
   polymarket:
     market-ws-enabled: true
     gamma-url: https://gamma-api.polymarket.com
@@ -15,8 +48,9 @@ hft:
   strategy:
     gabagool:
       enabled: true
-      refresh-millis: 500
-      min-replace-millis: 500           # Min time before replacing an order
+      refresh-millis: 750
+      min-replace-millis: 2000          # Min time before replacing an order
+      force-replace-millis: 12000       # Re-quote even if price/size unchanged (queue refresh)
       min-seconds-to-end: 0
       max-seconds-to-end: 3600
       improve-ticks: 0
@@ -25,34 +59,41 @@ hft:
       quote-size: 10
       quote-size-bankroll-fraction: 0.001
       bankroll-mode: FIXED
-      bankroll-usd: 500
+      bankroll-usd: 10000
       bankroll-refresh-millis: 10000
       bankroll-smoothing-alpha: 0.2
       bankroll-min-threshold: 50
       bankroll-trading-fraction: 0.8
       max-order-bankroll-fraction: 0.02
-      max-total-bankroll-fraction: 0.5
+      max-total-bankroll-fraction: 1.0
 
       # Complete-set arbitrage configuration
       # NOTE: Top traders don't pre-filter by edge - they quote both sides aggressively
       # Edge emerges from spread capture + inventory skewing, not from strict filtering
-      complete-set-min-edge: 0.001                    # Near-zero: aggressive quoting
+      complete-set-min-edge: 0.010                    # Only trade when complete-set edge meets 1.0% (gab baseline)
+      complete-set-cancel-edge: 0.009                 # Hysteresis cancel threshold (0.9%) to reduce low-edge fills
       complete-set-max-skew-ticks: 0                  # Max ticks to skew based on inventory
-      complete-set-imbalance-shares-for-max-skew: 5000 # Shares imbalance for max skew
-      complete-set-top-up-enabled: true
+      complete-set-imbalance-shares-for-max-skew: 4000 # Shares imbalance for max skew
+      complete-set-top-up-enabled: false
       complete-set-top-up-seconds-to-end: 120         # Start top-up this far from end
-      complete-set-top-up-min-shares: 80              # Min imbalance to trigger top-up
-      complete-set-fast-top-up-enabled: false
-      complete-set-fast-top-up-min-shares: 30         # Min shares for fast top-up
-      complete-set-fast-top-up-min-seconds-after-fill: 30  # Min seconds after fill
-      complete-set-fast-top-up-max-seconds-after-fill: 180 # Max seconds after fill
-      complete-set-fast-top-up-cooldown-millis: 45000 # Cooldown between fast top-ups
-      complete-set-fast-top-up-min-edge: 0            # Breakeven or better for pair completion
+      complete-set-top-up-min-shares: 200             # Min imbalance to trigger top-up
+      complete-set-fast-top-up-enabled: true
+      complete-set-fast-top-up-min-shares: 80         # Min shares for fast top-up (reduce taker frequency)
+      complete-set-fast-top-up-min-seconds-after-fill: 2   # Min seconds after fill
+      complete-set-fast-top-up-max-seconds-after-fill: 25  # Max seconds after fill
+      complete-set-fast-top-up-cooldown-millis: 20000 # Cooldown between fast top-ups
+      complete-set-fast-top-up-min-edge: -0.020       # Allow negative edge on hedge leg (cleanup/hedge behavior)
+      complete-set-fast-top-up-fraction: 0.30         # Hedge 30% of imbalance (leave more residual; reduce taker volume)
+      complete-set-fast-top-up-probability: 0.30      # Per-lead-fill chance to attempt fast top-up (target lead→lag 2–30s)
+      complete-set-hedge-delay-enabled: true
+      complete-set-hedge-delay-min-seconds: 2
+      complete-set-hedge-delay-max-seconds: 180
 
       # Taker mode - cross the spread when edge is favorable
       taker-mode-enabled: true
-      taker-mode-max-edge: 0.004                      # Max edge to take (0.4 cents)
-      taker-mode-max-spread: 0.01                     # Max spread to cross (1 cent)
+      taker-mode-max-edge: 0.015                      # Max edge to take (1.5 cents)
+      taker-mode-max-spread: 0.02                     # Max spread to cross (2 cents)
+      taker-mode-probability: 0.10                    # Probability of taking when conditions are met
 
 logging:
   level:

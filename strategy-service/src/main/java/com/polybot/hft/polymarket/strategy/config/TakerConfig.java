@@ -8,9 +8,10 @@ import java.math.BigDecimal;
 public record TakerConfig(
         boolean enabled,
         double maxEdge,
-        BigDecimal maxSpread
+        BigDecimal maxSpread,
+        double probability
 ) {
     public static TakerConfig defaults() {
-        return new TakerConfig(false, 0.015, BigDecimal.valueOf(0.02));
+        return new TakerConfig(false, 0.015, BigDecimal.valueOf(0.02), 1.0);
     }
 }

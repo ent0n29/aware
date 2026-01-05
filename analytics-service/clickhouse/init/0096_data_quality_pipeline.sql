@@ -1,8 +1,14 @@
 -- =============================================================================
 -- DATA QUALITY PIPELINE
 -- =============================================================================
--- CONFIGURATION: Replace 'TARGET_USER' with the Polymarket username you want
--- to analyze. Run: sed -i 's/TARGET_USER/actual_username/g' this_file.sql
+-- NOTE:
+-- This file intentionally contains NO per-user hardcoding and does NOT create a
+-- materialized view that runs on every trade insert. The previous MV approach
+-- was prone to ClickHouse OOM/kafka-consumer stalls due to ASOF joins + heavy
+-- enrichment JOINs in the ingest hot path.
+--
+-- Populate `polybot.user_trade_clean` via a small periodic batch job instead
+-- (see `research/backfill_user_trade_clean.py`).
 -- =============================================================================
 -- Purpose: Create clean, validated datasets for strategy backtesting
 --
@@ -78,162 +84,13 @@ ORDER BY (username, market_slug, ts, event_key);
 
 
 -- =============================================================================
--- 2) MATERIALIZED VIEW: Auto-populate clean trades
+-- 2) POPULATION (BATCH JOB, NOT MV)
 -- =============================================================================
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS polybot.user_trade_clean_mv
-TO polybot.user_trade_clean
-AS
-WITH
-    -- NOTE: This MV must read from an INSERTed table (not a VIEW) to auto-populate.
-    -- `user_trade_enriched_v3` is a VIEW, so a MV reading from it will not fire.
-    --
-    -- Get the other token's TOB via ASOF join (paired leg) and compute seconds_to_end
-    -- from Gamma metadata (with a slug-based fallback for 15m markets).
-    toDateTime64('2000-01-01 00:00:00', 3) AS min_valid_dt,
-    trades_with_other AS (
-        SELECT
-            u.ts AS ts,
-            u.username AS username,
-            u.market_slug AS market_slug,
-
-            -- Series classification
-            multiIf(
-                u.market_slug LIKE 'btc-updown-15m-%', 'btc-15m',
-                u.market_slug LIKE 'eth-updown-15m-%', 'eth-15m',
-                u.market_slug LIKE 'bitcoin-up-or-down-%', 'btc-1h',
-                u.market_slug LIKE 'ethereum-up-or-down-%', 'eth-1h',
-                'other'
-            ) AS series,
-
-            u.token_id AS token_id,
-            g.token_ids AS token_ids,
-            if(u.outcome = 'Up', g.token_ids[2], g.token_ids[1]) AS other_token_id,
-            u.outcome AS outcome,
-            u.side AS side,
-            u.price AS price,
-            u.size AS size,
-
-            -- seconds_to_end
-            if(g.end_date < min_valid_dt, CAST(NULL, 'Nullable(DateTime64(3))'), toNullable(g.end_date)) AS gamma_end_date,
-            toUInt32OrZero(splitByChar('-', toString(u.market_slug))[-1]) AS slug_epoch_start,
-            if((position(toString(u.market_slug), 'updown-15m-') > 0) AND (slug_epoch_start > 0),
-               toDateTime64(slug_epoch_start + 900, 3),
-               CAST(NULL, 'Nullable(DateTime64(3))')
-            ) AS slug_end_date,
-            coalesce(gamma_end_date, slug_end_date) AS end_date,
-            if(end_date IS NULL, CAST(NULL, 'Nullable(Int64)'), dateDiff('second', u.ts, end_date)) AS seconds_to_end,
-
-            -- Our side TOB (prefer WS at decision time; fall back to trade-time REST snapshot)
-            if(w.ts < min_valid_dt, CAST(NULL, 'Nullable(DateTime64(3))'), toNullable(w.ts)) AS ws_ts,
-            if(ws_ts IS NULL, CAST(NULL, 'Nullable(Float64)'), nullIf(w.best_bid_price, 0)) AS ws_best_bid_price,
-            if(ws_ts IS NULL, CAST(NULL, 'Nullable(Float64)'), nullIf(w.best_bid_size, 0)) AS ws_best_bid_size,
-            if(ws_ts IS NULL, CAST(NULL, 'Nullable(Float64)'), nullIf(w.best_ask_price, 0)) AS ws_best_ask_price,
-            if(ws_ts IS NULL, CAST(NULL, 'Nullable(Float64)'), nullIf(w.best_ask_size, 0)) AS ws_best_ask_size,
-            if((ws_best_bid_price > 0) AND (ws_best_ask_price > 0),
-               (ws_best_bid_price + ws_best_ask_price) / 2,
-               CAST(NULL, 'Nullable(Float64)')
-            ) AS ws_mid,
-            coalesce(ws_best_bid_price, t.best_bid_price) AS our_best_bid,
-            coalesce(ws_best_bid_size, t.best_bid_size) AS our_best_bid_size,
-            coalesce(ws_best_ask_price, t.best_ask_price) AS our_best_ask,
-            coalesce(ws_best_ask_size, t.best_ask_size) AS our_best_ask_size,
-            coalesce(ws_mid, t.mid) AS our_mid,
-            toInt64(
-                if(ws_ts IS NULL,
-                   dateDiff('millisecond', t.tob_captured_at, u.ts),
-                   dateDiff('millisecond', ws_ts, u.ts)
-                )
-            ) AS our_tob_lag_ms,
-
-            -- Other side TOB from WS
-            o.best_bid_price AS other_best_bid,
-            o.best_bid_size AS other_best_bid_size,
-            o.best_ask_price AS other_best_ask,
-            o.best_ask_size AS other_best_ask_size,
-            (o.best_bid_price + o.best_ask_price) / 2 AS other_mid,
-            toInt64(dateDiff('millisecond', o.ts, u.ts)) AS other_tob_lag_ms,
-
-            -- Settlement / realized PnL (0 if unresolved)
-            arrayMax(g.outcome_prices) AS max_outcome_price,
-            arrayMin(g.outcome_prices) AS min_outcome_price,
-            (max_outcome_price >= 0.999) AND (min_outcome_price <= 0.001) AS is_resolved,
-            indexOf(g.outcomes, toString(u.outcome)) AS trade_outcome_idx,
-            if(is_resolved AND (trade_outcome_idx > 0), g.outcome_prices[trade_outcome_idx], CAST(NULL, 'Nullable(Float64)')) AS settle_price,
-            if(is_resolved AND (settle_price IS NOT NULL),
-               u.size * if(u.side = 'SELL', u.price - settle_price, settle_price - u.price),
-               CAST(NULL, 'Nullable(Float64)')
-            ) AS realized_pnl,
-
-            if(ws_best_bid_price > 0, 'WS', 'REST') AS tob_source,
-
-            u.event_key AS event_key,
-            now64(3) AS ingested_at
-
-        FROM polybot.user_trades u
-        LEFT JOIN polybot.clob_tob_by_trade_v2 t
-            ON (t.trade_key = u.event_key) AND (t.token_id = u.token_id)
-        LEFT JOIN polybot.gamma_markets_latest g
-            ON g.slug = u.market_slug
-        ASOF LEFT JOIN polybot.market_ws_tob w
-            ON (w.asset_id = u.token_id) AND (u.ts >= w.ts)
-        ASOF LEFT JOIN polybot.market_ws_tob o
-            ON if(u.outcome = 'Up', g.token_ids[2], g.token_ids[1]) = o.asset_id
-            AND u.ts >= o.ts
-        WHERE u.username = 'TARGET_USER'
-          AND (u.market_slug LIKE '%updown%' OR u.market_slug LIKE '%up-or-down%')
-    )
-SELECT
-    ts,
-    username,
-    market_slug,
-    series,
-    token_id,
-    other_token_id,
-    outcome,
-    side,
-    price,
-    size,
-    seconds_to_end,
-    our_best_bid,
-    our_best_bid_size,
-    our_best_ask,
-    our_best_ask_size,
-    our_mid,
-    our_tob_lag_ms,
-    other_best_bid,
-    other_best_bid_size,
-    other_best_ask,
-    other_best_ask_size,
-    other_mid,
-    other_tob_lag_ms,
-
-    -- Calculate complete-set edge
-    if(outcome = 'Up',
-       1.0 - our_best_bid - other_best_bid,
-       1.0 - other_best_bid - our_best_bid
-    ) AS complete_set_edge,
-
-    is_resolved,
-    settle_price,
-    realized_pnl,
-    tob_source,
-    event_key,
-    ingested_at
-
-FROM trades_with_other
-
--- QUALITY FILTERS
-WHERE series != 'other'                              -- Valid series
-  AND seconds_to_end IS NOT NULL                     -- Has time-to-end
-  AND seconds_to_end >= 0                            -- Valid time
-  AND our_best_bid > 0                               -- Has our TOB
-  AND our_best_ask > 0
-  AND other_best_bid > 0                             -- Has other TOB
-  AND other_best_ask > 0
-  AND abs(our_tob_lag_ms) < 5000                     -- Fresh our TOB (< 5s)
-  AND abs(other_tob_lag_ms) < 5000                   -- Fresh other TOB (< 5s)
-  AND length(token_ids) = 2;                         -- Has both token IDs
+--
+-- `polybot.user_trade_clean` is populated by an external batch job that runs a
+-- time-bounded INSERT SELECT (last N minutes/hours) to avoid impacting ingest.
+--
+-- See: `research/backfill_user_trade_clean.py`
 
 
 -- =============================================================================
@@ -245,6 +102,7 @@ CREATE OR REPLACE VIEW polybot.data_quality_metrics AS
 WITH
     raw_counts AS (
         SELECT
+            username,
             count() AS total_raw,
             countIf(market_slug LIKE '%updown%' OR market_slug LIKE '%up-or-down%') AS updown_markets,
             countIf(seconds_to_end IS NOT NULL AND seconds_to_end >= 0) AS has_time_to_end,
@@ -253,14 +111,20 @@ WITH
             countIf(ws_best_bid_price > 0) AS has_ws_tob,
             countIf(is_resolved = 1) AS is_resolved
         FROM polybot.user_trade_enriched_v3
-        WHERE username = 'TARGET_USER'
+        WHERE (market_slug LIKE '%updown%' OR market_slug LIKE '%up-or-down%')
+          AND ts >= now() - INTERVAL 7 DAY
+        GROUP BY username
     ),
     clean_counts AS (
-        SELECT count() AS total_clean
+        SELECT
+            username,
+            count() AS total_clean
         FROM polybot.user_trade_clean
-        WHERE username = 'TARGET_USER'
+        WHERE ts >= now() - INTERVAL 7 DAY
+        GROUP BY username
     )
 SELECT
+    r.username,
     r.total_raw,
     r.updown_markets,
     r.has_time_to_end,
@@ -268,10 +132,11 @@ SELECT
     r.has_our_tob,
     r.has_ws_tob,
     r.is_resolved,
-    c.total_clean,
-    round(c.total_clean * 100.0 / nullif(r.total_raw, 0), 2) AS clean_rate_pct,
-    r.total_raw - c.total_clean AS rejected_count
-FROM raw_counts r, clean_counts c;
+    coalesce(c.total_clean, 0) AS total_clean,
+    round(coalesce(c.total_clean, 0) * 100.0 / nullif(r.total_raw, 0), 2) AS clean_rate_pct,
+    r.total_raw - coalesce(c.total_clean, 0) AS rejected_count
+FROM raw_counts r
+LEFT JOIN clean_counts c USING (username);
 
 
 -- =============================================================================
@@ -283,23 +148,26 @@ CREATE OR REPLACE VIEW polybot.data_quality_by_day AS
 WITH
     raw_by_day AS (
         SELECT
+            username,
             toDate(ts) AS day,
             count() AS raw_count,
             countIf(ws_best_bid_price > 0) AS ws_tob_count
         FROM polybot.user_trade_enriched_v3
-        WHERE username = 'TARGET_USER'
-          AND (market_slug LIKE '%updown%' OR market_slug LIKE '%up-or-down%')
-        GROUP BY day
+        WHERE (market_slug LIKE '%updown%' OR market_slug LIKE '%up-or-down%')
+          AND ts >= now() - INTERVAL 30 DAY
+        GROUP BY username, day
     ),
     clean_by_day AS (
         SELECT
+            username,
             toDate(ts) AS day,
             count() AS clean_count
         FROM polybot.user_trade_clean
-        WHERE username = 'TARGET_USER'
-        GROUP BY day
+        WHERE ts >= now() - INTERVAL 30 DAY
+        GROUP BY username, day
     )
 SELECT
+    r.username,
     r.day,
     r.raw_count,
     r.ws_tob_count,
@@ -307,8 +175,9 @@ SELECT
     round(coalesce(c.clean_count, 0) * 100.0 / nullif(r.raw_count, 0), 2) AS clean_rate_pct,
     round(r.ws_tob_count * 100.0 / nullif(r.raw_count, 0), 2) AS ws_coverage_pct
 FROM raw_by_day r
-LEFT JOIN clean_by_day c ON r.day = c.day
-ORDER BY r.day DESC;
+LEFT JOIN clean_by_day c
+  ON (r.username = c.username) AND (r.day = c.day)
+ORDER BY r.username, r.day DESC;
 
 
 -- =============================================================================
@@ -319,6 +188,7 @@ ORDER BY r.day DESC;
 CREATE OR REPLACE VIEW polybot.backtest_ready AS
 SELECT
     ts,
+    username,
     market_slug,
     series,
     token_id,
@@ -353,7 +223,6 @@ SELECT
     tob_source
 
 FROM polybot.user_trade_clean
-WHERE username = 'TARGET_USER'
 ORDER BY ts;
 
 
@@ -394,10 +263,10 @@ WITH
 
         FROM polybot.user_trade_clean t
         LEFT JOIN base_sizes b ON t.series = b.series
-        WHERE t.username = 'TARGET_USER'
     )
 SELECT
     ts,
+    username,
     market_slug,
     series,
     outcome,
@@ -444,6 +313,7 @@ FROM decisions;
 
 CREATE OR REPLACE VIEW polybot.replication_score_clean AS
 SELECT
+    username,
     count() AS total_clean_trades,
     countIf(would_quote) AS we_would_quote,
     countIf(match_type = 'MATCH') AS we_would_match,
@@ -475,4 +345,5 @@ SELECT
     round(avg(complete_set_edge) * 100, 3) AS avg_edge_pct,
     round(median(complete_set_edge) * 100, 3) AS median_edge_pct
 
-FROM polybot.strategy_validation_clean;
+FROM polybot.strategy_validation_clean
+GROUP BY username;

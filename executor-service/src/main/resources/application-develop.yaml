@@ -19,23 +19,25 @@ executor:
     fills-enabled: true
     fill-poll-millis: 250
     tob-max-age-millis: 5000
-    maker-fill-min-age-millis: 2000
-    lead-lag-min-millis: 2500
+    maker-fill-min-age-millis: 1000       # Reduced to allow earlier maker fills (orders >1s old)
+    lead-lag-min-millis: 1000             # Reduced from 2500ms to allow more tape fills (was blocking 60%)
     maker-fill-probability-per-poll: 0.020
     maker-fill-probability-multiplier-per-tick: 1.6
     maker-fill-probability-max-per-poll: 0.08
     maker-fill-fraction-of-remaining: 1.00
-    maker-queue-factor-min: 0.8
-    maker-queue-factor-max: 2.0
+    # Queue-ahead model: fraction of best-bid size assumed ahead of us when we join the best bid.
+    # Lower values increase tape-driven maker fills (closer to gab's ~55% maker mix).
+    maker-queue-factor-min: 0.10
+    maker-queue-factor-max: 0.15
     trade-tape-enabled: true
     # Preferred: ClickHouse `market_ws_trades` (fed by WS last_trade_price prints with size+side+txHash).
     trade-tape-source: CLICKHOUSE_MARKET_WS_TRADES
     trade-tape-poll-millis: 1000
     trade-tape-limit: 50
-    trade-tape-use-trade-timestamp: true
-    trade-tape-fallback-enabled: false
-    trade-tape-fallback-max-idle-millis: 2000
-    trade-tape-fallback-probability-scale: 0.15
+    trade-tape-use-trade-timestamp: false
+    trade-tape-fallback-enabled: true
+    trade-tape-fallback-max-idle-millis: 1500
+    trade-tape-fallback-probability-scale: 0.25
     trade-tape-bid-delta-cancel-scale: 0.25
     trade-tape-bid-delta-max-trade-lag-millis: 2000
     trade-tape-clickhouse-url: http://127.0.0.1:8123

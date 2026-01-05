@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 from enum import Enum
 
+from market_classifier import TraderCategoryProfiler
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +75,7 @@ class WeightingMethod(Enum):
     SCORE_WEIGHTED = "SCORE_WEIGHTED"  # Weight by Smart Money Score
     SHARPE_WEIGHTED = "SHARPE_WEIGHTED"  # Weight by Sharpe ratio
     VOLUME_WEIGHTED = "VOLUME_WEIGHTED"  # Weight by trading volume
+    ML_CLUSTER_BALANCED = "ML_CLUSTER_BALANCED"  # Equal weight per cluster, then by score within cluster
 
 
 class RebalanceFrequency(Enum):
@@ -86,9 +89,10 @@ class RebalanceFrequency(Enum):
 @dataclass
 class IndexConstituent:
     """A single trader in the index"""
+    proxy_address: str         # Trader's wallet address (required for fund mirroring)
     username: str
     weight: float              # Portfolio weight (0.0 to 1.0)
-    total_score: float   # Score at time of inclusion
+    total_score: float         # Score at time of inclusion
     sharpe_ratio: float        # Sharpe at time of inclusion
     strategy_type: str         # e.g., "ARBITRAGEUR", "DIRECTIONAL"
     added_at: datetime         # When added to index
@@ -240,6 +244,29 @@ INDEX_CONFIGS = {
         required_categories=["NEWS", "POLITICS"],  # News often overlaps with politics
         min_category_concentration=0.5,
     ),
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ML-POWERED INDEX
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # PSI-ALPHA: ML-selected traders with cluster-balanced diversification
+    # Uses Strategy DNA clustering to ensure diverse strategy mix
+    IndexType.PSI_ALPHA: IndexConfig(
+        index_type=IndexType.PSI_ALPHA,
+        num_constituents=15,
+        weighting_method=WeightingMethod.ML_CLUSTER_BALANCED,
+        rebalance_frequency=RebalanceFrequency.WEEKLY,
+        min_total_score=50.0,
+        min_trades=10,
+        min_days_active=7,
+        min_volume_usd=1000.0,
+        min_sharpe=0.0,
+        # Exclude HFT/arb (non-replicable)
+        excluded_strategies=NON_REPLICABLE_STRATEGIES,
+        # No category filter - ML selects across all markets
+        max_weight_per_trader=0.15,  # Max 15% per trader (more diversified)
+        max_strategy_concentration=0.30,  # Max 30% in one strategy cluster
+    ),
 }
 
 
@@ -280,6 +307,15 @@ class PSIIndexBuilder:
 
     def __init__(self, clickhouse_client):
         self.ch = clickhouse_client
+        # Category profiler for sectorial indexes (lazy-loaded)
+        self._category_profiler = None
+
+    @property
+    def category_profiler(self) -> TraderCategoryProfiler:
+        """Lazy-load category profiler to avoid overhead for non-sectorial indexes"""
+        if self._category_profiler is None:
+            self._category_profiler = TraderCategoryProfiler(self.ch)
+        return self._category_profiler
 
     def build_index(self, index_type: IndexType) -> PSIIndex:
         """
@@ -336,6 +372,7 @@ class PSIIndexBuilder:
         # Query traders with scores from ClickHouse
         query = f"""
         SELECT
+            proxy_address,
             username,
             total_score,
             sharpe_ratio,
@@ -363,15 +400,16 @@ class PSIIndexBuilder:
 
             for row in result.result_rows:
                 trader = {
-                    'username': row[0],
-                    'total_score': row[1],
-                    'sharpe_ratio': row[2],
-                    'strategy_type': row[3] or 'UNKNOWN',
-                    'total_trades': row[4],
-                    'days_active': row[5],
-                    'total_volume_usd': row[6],
-                    'total_pnl': row[7],
-                    'win_rate': row[8],
+                    'proxy_address': row[0],
+                    'username': row[1],
+                    'total_score': row[2],
+                    'sharpe_ratio': row[3],
+                    'strategy_type': row[4] or 'UNKNOWN',
+                    'total_trades': row[5],
+                    'days_active': row[6],
+                    'total_volume_usd': row[7],
+                    'total_pnl': row[8],
+                    'win_rate': row[9],
                 }
 
                 # Apply strategy filters
@@ -385,11 +423,108 @@ class PSIIndexBuilder:
 
                 traders.append(trader)
 
+            # Apply category filters for sectorial indexes
+            if config.required_categories:
+                traders = self._filter_by_category(
+                    traders,
+                    config.required_categories,
+                    config.min_category_concentration
+                )
+                logger.info(
+                    f"After category filter ({config.required_categories}): "
+                    f"{len(traders)} traders"
+                )
+
             return traders
 
         except Exception as e:
             logger.error(f"Failed to get eligible traders: {e}")
             return []
+
+    def _filter_by_category(
+        self,
+        traders: list[dict],
+        required_categories: list[str],
+        min_concentration: float
+    ) -> list[dict]:
+        """
+        Filter traders by market category concentration.
+
+        Args:
+            traders: List of trader dicts (must have 'proxy_address')
+            required_categories: Category names trader must specialize in
+            min_concentration: Minimum % of volume in required categories
+
+        Returns:
+            Filtered list of traders meeting category concentration
+        """
+        if not traders:
+            return []
+
+        # Get category profiles for all traders
+        addresses = [t['proxy_address'] for t in traders]
+        logger.info(f"Profiling {len(addresses)} traders for category concentration...")
+
+        filtered = []
+        for trader in traders:
+            profile = self.category_profiler.get_trader_category_distribution(
+                trader['proxy_address']
+            )
+
+            # Sum concentration across required categories
+            total_concentration = sum(
+                profile.get(cat, 0.0)
+                for cat in required_categories
+            )
+
+            if total_concentration >= min_concentration:
+                # Store concentration for debugging/display
+                trader['category_concentration'] = total_concentration
+                filtered.append(trader)
+
+        return filtered
+
+    def _get_ml_cluster_assignments(
+        self,
+        proxy_addresses: list[str]
+    ) -> dict[str, str]:
+        """
+        Get ML strategy cluster assignments from aware_ml_enrichment table.
+
+        Args:
+            proxy_addresses: List of trader addresses
+
+        Returns:
+            Dict mapping proxy_address -> strategy_cluster name
+        """
+        if not proxy_addresses:
+            return {}
+
+        try:
+            # Build IN clause safely
+            addr_list = "', '".join(proxy_addresses)
+            query = f"""
+            SELECT
+                proxy_address,
+                strategy_cluster
+            FROM polybot.aware_ml_enrichment FINAL
+            WHERE proxy_address IN ('{addr_list}')
+            """
+
+            result = self.ch.query(query)
+
+            assignments = {}
+            for row in result.result_rows:
+                addr, cluster = row[0], row[1]
+                assignments[addr] = cluster or 'UNKNOWN'
+
+            logger.info(f"Got ML cluster assignments for {len(assignments)}/{len(proxy_addresses)} traders")
+            return assignments
+
+        except Exception as e:
+            logger.warning(f"Failed to get ML cluster assignments: {e}")
+            # Fall back to UNKNOWN for all
+            return {addr: 'UNKNOWN' for addr in proxy_addresses}
 
     def _select_constituents(
         self,
@@ -437,6 +572,7 @@ class PSIIndexBuilder:
             weight = 1.0 / len(traders)
             for t in traders:
                 constituents.append(IndexConstituent(
+                    proxy_address=t['proxy_address'],
                     username=t['username'],
                     weight=weight,
                     total_score=t['total_score'],
@@ -452,6 +588,7 @@ class PSIIndexBuilder:
                 weight = t['total_score'] / total_score if total_score > 0 else 0
                 weight = min(weight, config.max_weight_per_trader)
                 constituents.append(IndexConstituent(
+                    proxy_address=t['proxy_address'],
                     username=t['username'],
                     weight=weight,
                     total_score=t['total_score'],
@@ -468,6 +605,7 @@ class PSIIndexBuilder:
                 weight = sharpe / total_sharpe if total_sharpe > 0 else 0
                 weight = min(weight, config.max_weight_per_trader)
                 constituents.append(IndexConstituent(
+                    proxy_address=t['proxy_address'],
                     username=t['username'],
                     weight=weight,
                     total_score=t['total_score'],
@@ -475,6 +613,49 @@ class PSIIndexBuilder:
                     strategy_type=t['strategy_type'],
                     added_at=now,
                 ))
+
+        elif config.weighting_method == WeightingMethod.ML_CLUSTER_BALANCED:
+            # ML-based: Equal weight per cluster, score-weighted within cluster
+            # This ensures diversification across strategy archetypes
+            cluster_assignments = self._get_ml_cluster_assignments(
+                [t['proxy_address'] for t in traders]
+            )
+
+            # Group traders by cluster
+            clusters = {}
+            for t in traders:
+                cluster = cluster_assignments.get(t['proxy_address'], 'UNKNOWN')
+                if cluster not in clusters:
+                    clusters[cluster] = []
+                clusters[cluster].append(t)
+
+            # Calculate weights: equal across clusters, score-weighted within
+            num_clusters = len(clusters) if clusters else 1
+            cluster_weight = 1.0 / num_clusters
+
+            for cluster_name, cluster_traders in clusters.items():
+                # Score-weighted within cluster
+                cluster_total_score = sum(t['total_score'] for t in cluster_traders)
+                for t in cluster_traders:
+                    if cluster_total_score > 0:
+                        within_cluster_weight = t['total_score'] / cluster_total_score
+                    else:
+                        within_cluster_weight = 1.0 / len(cluster_traders)
+
+                    weight = cluster_weight * within_cluster_weight
+                    weight = min(weight, config.max_weight_per_trader)
+
+                    constituents.append(IndexConstituent(
+                        proxy_address=t['proxy_address'],
+                        username=t['username'],
+                        weight=weight,
+                        total_score=t['total_score'],
+                        sharpe_ratio=t['sharpe_ratio'],
+                        strategy_type=cluster_name,  # Use ML cluster as strategy
+                        added_at=now,
+                    ))
+
+            logger.info(f"ML cluster weighting: {len(clusters)} clusters, {len(constituents)} traders")
 
         # Normalize weights to sum to 1.0
         total_weight = sum(c.weight for c in constituents)
@@ -525,12 +706,20 @@ class PSIIndexBuilder:
     def save_index(self, index: PSIIndex) -> bool:
         """Save index to ClickHouse"""
         try:
+            # Delete old entries for this index type first
+            # This ensures removed traders don't remain in the table
+            self.ch.command(
+                f"ALTER TABLE aware_psi_index DELETE WHERE index_type = '{index.index_type.value}'"
+            )
+            logger.info(f"Cleared old {index.index_type.value} entries")
+
             # Prepare data for insertion
             rows = []
             for c in index.constituents:
                 rows.append((
                     index.index_type.value,
                     c.username,
+                    c.proxy_address,
                     c.weight,
                     c.total_score,
                     c.sharpe_ratio,
@@ -543,7 +732,7 @@ class PSIIndexBuilder:
                 'aware_psi_index',
                 rows,
                 column_names=[
-                    'index_type', 'username', 'weight',
+                    'index_type', 'username', 'proxy_address', 'weight',
                     'total_score', 'sharpe_ratio', 'strategy_type',
                     'created_at', 'rebalanced_at'
                 ]

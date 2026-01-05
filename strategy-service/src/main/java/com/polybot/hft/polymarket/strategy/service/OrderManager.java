@@ -142,7 +142,16 @@ public class OrderManager {
         }
 
         long ageMillis = Duration.between(existing.placedAt(), clock.instant()).toMillis();
-        if (ageMillis < cfg.minReplaceMillis()) {
+        // Price-down moves are riskier than price-up moves (we can end up overpaying if we don't track the market),
+        // so allow faster downward replaces than the general minReplaceMillis gate.
+        long minReplaceMillis = cfg.minReplaceMillis();
+        if (existing.price() != null && newPrice != null && newPrice.compareTo(existing.price()) < 0) {
+            long refreshMillis = cfg.refreshMillis();
+            if (refreshMillis > 0) {
+                minReplaceMillis = Math.min(minReplaceMillis, refreshMillis);
+            }
+        }
+        if (ageMillis < minReplaceMillis) {
             return ReplaceDecision.SKIP; // Too soon to replace
         }
 

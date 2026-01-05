@@ -51,6 +51,7 @@ interface IndexConstituent {
 }
 
 // Mock data for now (API endpoints will be added)
+// Note: Use empty string for last_updated to avoid hydration mismatch
 const mockOverview: FundOverview = {
   fund_id: 'psi-10-main',
   nav: 10000,
@@ -61,7 +62,7 @@ const mockOverview: FundOverview = {
   total_return: 0,
   open_positions: 0,
   num_traders: 10,
-  last_updated: new Date().toISOString(),
+  last_updated: '',  // Set client-side to avoid SSR mismatch
 }
 
 export default function FundPage() {
@@ -157,8 +158,8 @@ export default function FundPage() {
           <span className="px-3 py-1 rounded-full bg-green-500/10 text-green-400 text-sm font-medium">
             Active
           </span>
-          <span className="text-xs text-slate-500">
-            Updated {new Date(overview.last_updated).toLocaleTimeString()}
+          <span className="text-xs text-slate-500" suppressHydrationWarning>
+            {overview.last_updated ? `Updated ${new Date(overview.last_updated).toLocaleTimeString()}` : 'Loading...'}
           </span>
         </div>
       </div>

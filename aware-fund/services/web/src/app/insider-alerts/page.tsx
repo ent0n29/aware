@@ -16,7 +16,7 @@ import {
   UserPlus,
   BarChart3,
   GitBranch,
-  Whale,
+  Fish,  // Using Fish instead of Whale (not available in lucide-react)
   ExternalLink,
 } from 'lucide-react'
 import { cn, formatNumber, formatCurrency } from '@/lib/utils'
@@ -48,7 +48,7 @@ const signalTypes = {
     border: 'border-yellow-500/30',
   },
   WHALE_ANOMALY: {
-    icon: Whale,
+    icon: Fish,  // Using Fish as whale icon (Whale not in lucide-react)
     label: 'Whale Anomaly',
     description: 'Known whale entering unusual market category',
     color: 'text-purple-400',

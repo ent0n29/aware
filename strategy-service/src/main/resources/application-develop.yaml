@@ -13,7 +13,7 @@ hft:
   # =============================================================================
   # Mirrors positions of top traders in the PSI-10 index
   fund:
-    enabled: false
+    enabled: true
     index-type: PSI-10
     capital-usd: 10000
     max-position-pct: 0.10          # Max 10% of capital per position
@@ -48,9 +48,9 @@ hft:
   strategy:
     gabagool:
       enabled: true
-      refresh-millis: 750
-      min-replace-millis: 2000          # Min time before replacing an order
-      force-replace-millis: 12000       # Re-quote even if price/size unchanged (queue refresh)
+      refresh-millis: 1500
+      min-replace-millis: 4000          # Min 4s before replacing (reduce churn to allow tape fills)
+      force-replace-millis: 20000       # Re-quote even if price/size unchanged (queue refresh)
       min-seconds-to-end: 0
       max-seconds-to-end: 3600
       improve-ticks: 0
@@ -70,8 +70,10 @@ hft:
       # Complete-set arbitrage configuration
       # NOTE: Top traders don't pre-filter by edge - they quote both sides aggressively
       # Edge emerges from spread capture + inventory skewing, not from strict filtering
-      complete-set-min-edge: 0.010                    # Only trade when complete-set edge meets 1.0% (gab baseline)
-      complete-set-cancel-edge: 0.009                 # Hysteresis cancel threshold (0.9%) to reduce low-edge fills
+      # Gab trades at ~1% median edge, but also participates down to ~0% on active tape.
+      # Use wider hysteresis to avoid cancel-churn and keep orders matchable.
+      complete-set-min-edge: 0.006                    # Entry edge (0.6%)
+      complete-set-cancel-edge: 0.002                 # Cancel edge (0.2%)
       complete-set-max-skew-ticks: 0                  # Max ticks to skew based on inventory
       complete-set-imbalance-shares-for-max-skew: 4000 # Shares imbalance for max skew
       complete-set-top-up-enabled: false
@@ -82,9 +84,9 @@ hft:
       complete-set-fast-top-up-min-seconds-after-fill: 2   # Min seconds after fill
       complete-set-fast-top-up-max-seconds-after-fill: 25  # Max seconds after fill
       complete-set-fast-top-up-cooldown-millis: 20000 # Cooldown between fast top-ups
-      complete-set-fast-top-up-min-edge: -0.020       # Allow negative edge on hedge leg (cleanup/hedge behavior)
+      complete-set-fast-top-up-min-edge: 0.000        # Min edge for fast top-up (0 = break-even)
       complete-set-fast-top-up-fraction: 0.30         # Hedge 30% of imbalance (leave more residual; reduce taker volume)
-      complete-set-fast-top-up-probability: 0.30      # Per-lead-fill chance to attempt fast top-up (target lead→lag 2–30s)
+      complete-set-fast-top-up-probability: 0.40      # Per-lead-fill chance to attempt fast top-up (gab ~47% in [2-5s] bucket)
       complete-set-hedge-delay-enabled: true
       complete-set-hedge-delay-min-seconds: 2
       complete-set-hedge-delay-max-seconds: 180
@@ -93,7 +95,7 @@ hft:
       taker-mode-enabled: true
       taker-mode-max-edge: 0.015                      # Max edge to take (1.5 cents)
       taker-mode-max-spread: 0.02                     # Max spread to cross (2 cents)
-      taker-mode-probability: 0.10                    # Probability of taking when conditions are met
+      taker-mode-probability: 0.10                    # Probability of taking when conditions are met (gab ~10% at ask)
 
 logging:
   level:

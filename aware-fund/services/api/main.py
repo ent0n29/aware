@@ -2040,6 +2040,240 @@ async def scan_for_insider_activity(hours: int = Query(default=24, ge=1, le=72))
 
 
 # ============================================================================
+# ML ENRICHMENT ENDPOINTS
+# ============================================================================
+
+class MLClusterSummary(BaseModel):
+    """Summary of a Strategy DNA cluster"""
+    cluster_id: int
+    strategy_cluster: str
+    trader_count: int
+    anomaly_count: int
+    avg_anomaly_score: float
+
+
+class MLTraderEnrichment(BaseModel):
+    """ML enrichment data for a trader"""
+    proxy_address: str
+    username: str
+    cluster_id: int
+    strategy_cluster: str
+    cluster_description: str
+    is_anomaly: bool
+    anomaly_score: float
+    anomaly_type: str
+    updated_at: Optional[datetime]
+
+
+class MLAnomalyEntry(BaseModel):
+    """An anomalous trader entry"""
+    proxy_address: str
+    username: str
+    strategy_cluster: str
+    anomaly_score: float
+    anomaly_type: str
+    smart_money_score: Optional[float]
+    total_volume: Optional[float]
+
+
+@app.get("/api/ml/clusters", response_model=list[MLClusterSummary])
+async def get_ml_clusters():
+    """
+    Get Strategy DNA cluster distribution.
+
+    Shows how traders are grouped by behavioral patterns.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query("""
+            SELECT
+                cluster_id,
+                strategy_cluster,
+                count() AS trader_count,
+                sum(is_anomaly) AS anomaly_count,
+                avg(anomaly_score) AS avg_anomaly_score
+            FROM polybot.aware_ml_enrichment FINAL
+            GROUP BY cluster_id, strategy_cluster
+            ORDER BY trader_count DESC
+        """)
+
+        clusters = []
+        for row in result.result_rows:
+            clusters.append(MLClusterSummary(
+                cluster_id=int(row[0]),
+                strategy_cluster=row[1] or 'UNKNOWN',
+                trader_count=int(row[2]),
+                anomaly_count=int(row[3]),
+                avg_anomaly_score=float(row[4]) if row[4] else 0.0
+            ))
+
+        return clusters
+
+    except Exception as e:
+        logger.error(f"Failed to get ML clusters: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/anomalies", response_model=list[MLAnomalyEntry])
+async def get_ml_anomalies(
+    limit: int = Query(default=50, ge=1, le=200),
+    anomaly_type: Optional[str] = Query(default=None)
+):
+    """
+    Get traders flagged as anomalous by ML models.
+
+    Anomaly types:
+    - ISOLATION: Detected by Isolation Forest (global outlier)
+    - RECONSTRUCTION: Detected by Autoencoder (behavioral anomaly)
+    - BOTH: Flagged by both models (high confidence anomaly)
+    """
+    try:
+        client = get_clickhouse_client()
+
+        where_clause = "is_anomaly = 1"
+        if anomaly_type:
+            safe_type = anomaly_type.upper()
+            if safe_type in ('ISOLATION', 'RECONSTRUCTION', 'BOTH'):
+                where_clause += f" AND anomaly_type = '{safe_type}'"
+
+        query = f"""
+            SELECT
+                ml.proxy_address,
+                ml.username,
+                ml.strategy_cluster,
+                ml.anomaly_score,
+                ml.anomaly_type,
+                s.total_score AS smart_money_score,
+                p.total_volume_usd AS total_volume
+            FROM (SELECT * FROM polybot.aware_ml_enrichment FINAL) AS ml
+            LEFT JOIN (SELECT * FROM polybot.aware_smart_money_scores FINAL) AS s
+                ON ml.proxy_address = s.proxy_address
+            LEFT JOIN (SELECT * FROM polybot.aware_trader_profiles FINAL) AS p
+                ON ml.proxy_address = p.proxy_address
+            WHERE {where_clause}
+            ORDER BY ml.anomaly_score ASC
+            LIMIT {limit}
+        """
+
+        result = client.query(query)
+
+        anomalies = []
+        for row in result.result_rows:
+            anomalies.append(MLAnomalyEntry(
+                proxy_address=row[0],
+                username=row[1] or '',
+                strategy_cluster=row[2] or 'UNKNOWN',
+                anomaly_score=float(row[3]) if row[3] else 0.0,
+                anomaly_type=row[4] or 'UNKNOWN',
+                smart_money_score=float(row[5]) if row[5] else None,
+                total_volume=float(row[6]) if row[6] else None
+            ))
+
+        return anomalies
+
+    except Exception as e:
+        logger.error(f"Failed to get ML anomalies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/trader/{identifier}", response_model=MLTraderEnrichment)
+async def get_trader_ml_enrichment(identifier: str):
+    """
+    Get ML enrichment data for a specific trader.
+
+    Looks up by username or proxy_address.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query("""
+            SELECT
+                proxy_address,
+                username,
+                cluster_id,
+                strategy_cluster,
+                cluster_description,
+                is_anomaly,
+                anomaly_score,
+                anomaly_type,
+                updated_at
+            FROM polybot.aware_ml_enrichment FINAL
+            WHERE lower(username) = lower(%(identifier)s)
+               OR lower(proxy_address) = lower(%(identifier)s)
+            LIMIT 1
+        """, parameters={'identifier': identifier})
+
+        if not result.result_rows:
+            raise HTTPException(status_code=404, detail=f"ML enrichment not found for '{identifier}'")
+
+        row = result.result_rows[0]
+        return MLTraderEnrichment(
+            proxy_address=row[0],
+            username=row[1] or '',
+            cluster_id=int(row[2]),
+            strategy_cluster=row[3] or 'UNKNOWN',
+            cluster_description=row[4] or '',
+            is_anomaly=bool(row[5]),
+            anomaly_score=float(row[6]) if row[6] else 0.0,
+            anomaly_type=row[7] or 'NORMAL',
+            updated_at=row[8]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get trader ML enrichment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/health")
+async def get_ml_health():
+    """
+    Get ML enrichment pipeline health status.
+
+    Shows when ML models last ran and coverage statistics.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query("""
+            SELECT
+                count() AS total_enriched,
+                countIf(is_anomaly = 1) AS anomalies,
+                uniqExact(strategy_cluster) AS num_clusters,
+                max(updated_at) AS last_update,
+                dateDiff('minute', max(updated_at), now()) AS minutes_ago
+            FROM polybot.aware_ml_enrichment FINAL
+        """)
+
+        if result.result_rows:
+            row = result.result_rows[0]
+            minutes_ago = row[4] if row[4] else 9999
+            status = 'healthy' if minutes_ago < 120 else 'stale' if minutes_ago < 360 else 'outdated'
+
+            return {
+                'status': status,
+                'traders_enriched': int(row[0]),
+                'anomalies_detected': int(row[1]),
+                'active_clusters': int(row[2]),
+                'last_update': row[3].isoformat() if row[3] else None,
+                'minutes_since_update': int(minutes_ago),
+                'recommendation': 'ML pipeline healthy' if status == 'healthy' else 'Consider running ML enrichment job'
+            }
+
+        return {
+            'status': 'no_data',
+            'traders_enriched': 0,
+            'recommendation': 'Run ML enrichment job to populate data'
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get ML health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 

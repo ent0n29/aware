@@ -538,7 +538,8 @@ public class PaperExchangeSimulator {
 
   private BigDecimal tickSize(String tokenId) {
     if (tokenId == null || tokenId.isBlank()) {
-      return BigDecimal.valueOf(0.001);
+      // Polymarket up/down markets are typically 1 cent ticks.
+      return BigDecimal.valueOf(0.01);
     }
     BigDecimal cached = tickSizeByTokenId.get(tokenId);
     if (cached != null && cached.compareTo(BigDecimal.ZERO) > 0) {
@@ -547,12 +548,12 @@ public class PaperExchangeSimulator {
     try {
       BigDecimal ts = clobClient.getMinimumTickSize(tokenId.trim());
       if (ts == null || ts.compareTo(BigDecimal.ZERO) <= 0) {
-        ts = BigDecimal.valueOf(0.001);
+        ts = BigDecimal.valueOf(0.01);
       }
       tickSizeByTokenId.put(tokenId, ts);
       return ts;
     } catch (Exception e) {
-      BigDecimal fallback = BigDecimal.valueOf(0.001);
+      BigDecimal fallback = BigDecimal.valueOf(0.01);
       tickSizeByTokenId.put(tokenId, fallback);
       return fallback;
     }
@@ -1547,12 +1548,12 @@ public class PaperExchangeSimulator {
       }
     }
 
-    // Crossed book -> fill immediately at best ask (taker-like). This can happen even if the order
-    // was maker at placement, if the ask moves down through our resting bid later.
+    // Crossed book -> fill immediately. If we were maker at placement, treat this as a maker-side
+    // fill at our resting bid (the incoming sell crossed into us). If we were already taker-like,
+    // fill at the current best ask.
     if (bestAsk.compareTo(price) <= 0) {
-      // If the book appears locked/crossed through our bid, treat as a maker-side fill at our
-      // resting limit price (the aggressor crossed into us).
-      fill(order, order.remainingSize, price, "MAKER_CROSS");
+      boolean makerCross = order.makerAtPlacement;
+      fill(order, order.remainingSize, makerCross ? price : bestAsk, makerCross ? "MAKER_CROSS" : "TAKER_CROSS");
       return;
     }
 

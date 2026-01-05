@@ -237,6 +237,39 @@ def run_anomaly_detection(ch_client) -> dict:
         return {'status': 'error', 'error': str(e)}
 
 
+def run_ml_enrichment(ch_client) -> dict:
+    """Run ML enrichment (Strategy DNA clustering + Anomaly Detection)"""
+    logger.info("Running ML enrichment...")
+    start = time.time()
+
+    try:
+        from ml_enrichment_job import MLEnrichmentJob, MLEnrichmentConfig
+        from clickhouse_client import ClickHouseClient
+
+        # Use our ClickHouseClient wrapper
+        aware_client = ClickHouseClient()
+        config = MLEnrichmentConfig(n_clusters=8, max_traders=5000)
+        job = MLEnrichmentJob(aware_client, config)
+        stats = job.run()
+
+        elapsed = time.time() - start
+        logger.info(f"ML enrichment complete in {elapsed:.1f}s")
+
+        return {
+            'status': 'success',
+            'traders_processed': stats.get('traders_processed', 0),
+            'clusters_created': stats.get('clusters_created', 0),
+            'anomalies_detected': stats.get('anomalies_detected', 0),
+            'elapsed_seconds': elapsed
+        }
+
+    except Exception as e:
+        logger.error(f"ML enrichment failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'status': 'error', 'error': str(e)}
+
+
 def run_edge_persistence(ch_client) -> dict:
     """Run edge persistence prediction"""
     logger.info("Running edge persistence prediction...")
@@ -397,10 +430,13 @@ def run_all_jobs(ch_client) -> dict:
     # 6. Edge Decay Scanning
     results['edge_decay'] = run_edge_decay_scan(ch_client)
 
-    # 7. Anomaly Detection
+    # 7. Anomaly Detection (rule-based)
     results['anomaly_detection'] = run_anomaly_detection(ch_client)
 
-    # 8. Edge Persistence Prediction
+    # 8. ML Enrichment (Strategy DNA clustering + ML-based anomaly detection)
+    results['ml_enrichment'] = run_ml_enrichment(ch_client)
+
+    # 9. Edge Persistence Prediction
     results['edge_persistence'] = run_edge_persistence(ch_client)
 
     total_elapsed = time.time() - start

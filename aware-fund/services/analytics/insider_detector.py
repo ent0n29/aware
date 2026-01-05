@@ -106,6 +106,42 @@ class InsiderDetectorConfig:
     min_market_liquidity: float = 1000      # Ignore low-liquidity markets
     lookback_hours: int = 24                # Hours to look back for signals
 
+    # Market exclusions - markets where insider trading is impossible
+    # Price prediction markets resolve based on public price data
+    excluded_market_patterns: tuple[str, ...] = (
+        # Generic short-term patterns
+        '%-15m-%',              # Any 15-minute market
+        '%-1h-%',               # Any 1-hour market
+        '%-hourly%',            # Hourly markets
+        '%updown%15m%',         # Updown 15-min patterns
+        # ALL crypto up/down markets (no insider info for price moves)
+        '%up-or-down%',         # Any "up or down" market (SOL, XRP, BTC, etc.)
+        '%up-down%',            # Up-down markets
+        '%updown%',             # Updown patterns
+        # BTC/Bitcoin price markets
+        'btc-updown%',
+        'bitcoin-above-%',
+        'will-bitcoin-%',
+        '%btc%above%',
+        '%bitcoin%reach%',
+        '%bitcoin%dip%',
+        # ETH/Ethereum price markets
+        'eth-updown%',
+        'ethereum-above-%',
+        'will-ethereum-%',
+        '%eth%above%',
+        '%ethereum%reach%',
+        '%ethereum%dip%',
+        # Other crypto price markets
+        'solana%up%down%',
+        'xrp%up%down%',
+        'doge%up%down%',
+        '%sol%above%',
+        '%xrp%above%',
+        '%solana%reach%',
+        '%xrp%reach%',
+    )
+
 
 class InsiderDetector:
     """
@@ -122,6 +158,22 @@ class InsiderDetector:
     ):
         self.ch = clickhouse_client
         self.config = config or InsiderDetectorConfig()
+
+    def _get_market_exclusion_sql(self, column: str = 'market_slug') -> str:
+        """
+        Generate SQL WHERE clause to exclude price prediction markets.
+
+        These markets (BTC/ETH up/down, 15m markets) cannot have insider trading
+        because they resolve based on public price data.
+        """
+        if not self.config.excluded_market_patterns:
+            return ""
+
+        conditions = []
+        for pattern in self.config.excluded_market_patterns:
+            conditions.append(f"{column} NOT LIKE '{pattern}'")
+
+        return " AND " + " AND ".join(conditions)
 
     def scan_for_insider_activity(
         self,
@@ -165,6 +217,7 @@ class InsiderDetector:
 
         Signal: Account created recently, bets big, concentrated in one market.
         """
+        market_exclusion = self._get_market_exclusion_sql('market_slug')
         query = f"""
         WITH
         recent_trades AS (
@@ -180,6 +233,7 @@ class InsiderDetector:
             FROM polybot.aware_global_trades_dedup
             WHERE ts >= now() - INTERVAL {hours} HOUR
               AND proxy_address != ''
+              {market_exclusion}
             GROUP BY proxy_address, username, market_slug, side
         ),
         trader_stats AS (
@@ -283,6 +337,7 @@ class InsiderDetector:
 
         Signal: Volume 10x normal in short period, before any news.
         """
+        market_exclusion = self._get_market_exclusion_sql('market_slug')
         query = f"""
         WITH
         -- Recent volume by market
@@ -296,6 +351,7 @@ class InsiderDetector:
             FROM polybot.aware_global_trades_dedup
             WHERE ts >= now() - INTERVAL {hours} HOUR
               AND market_slug != ''
+              {market_exclusion}
             GROUP BY market_slug
             HAVING recent_vol >= {self.config.min_market_liquidity}
         ),
@@ -308,6 +364,7 @@ class InsiderDetector:
             WHERE ts >= now() - INTERVAL {self.config.volume_spike_lookback_days} DAY
               AND ts < now() - INTERVAL {hours} HOUR
               AND market_slug != ''
+              {market_exclusion}
             GROUP BY market_slug
         )
         SELECT
@@ -384,6 +441,8 @@ class InsiderDetector:
 
         Signal: Multiple top-100 traders betting same direction, against consensus.
         """
+        market_exclusion = self._get_market_exclusion_sql('t.market_slug')
+        market_exclusion_ms = self._get_market_exclusion_sql('market_slug')
         query = f"""
         WITH
         -- Get top 100 traders by P&L
@@ -404,6 +463,7 @@ class InsiderDetector:
             FROM polybot.aware_global_trades_dedup t
             INNER JOIN top_traders tt ON t.proxy_address = tt.proxy_address
             WHERE t.ts >= now() - INTERVAL {hours} HOUR
+              {market_exclusion}
             GROUP BY t.market_slug, t.side, t.outcome_index
         ),
         -- Get overall market sentiment
@@ -415,6 +475,7 @@ class InsiderDetector:
                 if(yes_volume > no_volume, 0, 1) as consensus_outcome
             FROM polybot.aware_global_trades_dedup
             WHERE ts >= now() - INTERVAL 7 DAY
+              {market_exclusion_ms}
             GROUP BY market_slug
         )
         SELECT
@@ -491,6 +552,7 @@ class InsiderDetector:
         """
         # This requires market category data from TraderCategoryProfiler
         # For now, simplified version based on unusual market entry
+        market_exclusion = self._get_market_exclusion_sql('t.market_slug')
         query = f"""
         WITH
         -- Identify whales (high volume traders)
@@ -513,21 +575,23 @@ class InsiderDetector:
             FROM polybot.aware_global_trades_dedup t
             INNER JOIN whales w ON t.proxy_address = w.proxy_address
             WHERE t.ts < now() - INTERVAL {hours} HOUR  -- Historical only
+              {market_exclusion}
             GROUP BY t.proxy_address, t.market_slug
         ),
         -- Whale's recent activity
         whale_recent AS (
             SELECT
-                t.proxy_address,
-                w.username,
-                t.market_slug,
-                t.side,
-                t.outcome_index,
+                t.proxy_address AS proxy_address,
+                w.username AS username,
+                t.market_slug AS market_slug,
+                t.side AS side,
+                t.outcome_index AS outcome_index,
                 sum(t.notional) as recent_bet,
                 count() as trade_count
             FROM polybot.aware_global_trades_dedup t
             INNER JOIN whales w ON t.proxy_address = w.proxy_address
             WHERE t.ts >= now() - INTERVAL {hours} HOUR
+              {market_exclusion}
             GROUP BY t.proxy_address, w.username, t.market_slug, t.side, t.outcome_index
         )
         SELECT

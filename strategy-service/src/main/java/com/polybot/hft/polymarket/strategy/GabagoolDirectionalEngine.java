@@ -458,12 +458,13 @@ public class GabagoolDirectionalEngine {
         double r = ThreadLocalRandom.current().nextDouble();
 
         // Index = ticks above best bid (0..s-1).
-        // Calibrated to match observed maker improve distribution (most mass on +1 tick when spread>=2).
+        // Calibrated to match gabagool22's actual behavior: p50_above_bid = 0 (quotes AT the bid).
+        // Previous weights had 50%+ mass on +1 tick, causing our p50 = 0.01. Fixed to 85% at bid.
         double[] weights = switch (s) {
-            case 2 -> new double[]{0.50, 0.50};
-            case 3 -> new double[]{0.25, 0.50, 0.25};
-            case 4 -> new double[]{0.20, 0.45, 0.25, 0.10};
-            default -> new double[]{0.20, 0.40, 0.25, 0.10, 0.05};
+            case 2 -> new double[]{0.85, 0.15};
+            case 3 -> new double[]{0.80, 0.15, 0.05};
+            case 4 -> new double[]{0.80, 0.12, 0.05, 0.03};
+            default -> new double[]{0.80, 0.12, 0.05, 0.02, 0.01};
         };
 
         int sampled = sampleFromWeights(s, r, weights);
@@ -760,14 +761,15 @@ public class GabagoolDirectionalEngine {
             return;
         }
 
-        // Slow-hedge path: cancel lagging order and extend the hedge hold window. This creates the
-        // long-tail 60–120s lead→lag delays observed in the target user's prints.
+        // Slow-hedge path: cancel lagging order and extend the hedge hold window. Uses the full
+        // lead→lag delay distribution from sampleHedgeDelaySeconds() - including [2-5s] bucket with
+        // 36% weight to match gabagool22's hedge timing (47% in [2-5s]).
         Direction laggingLeg = state.direction() == Direction.UP ? Direction.DOWN : Direction.UP;
         String laggingTokenId = laggingLeg == Direction.UP ? state.market().upTokenId() : state.market().downTokenId();
         long secondsToEnd = Duration.between(clock.instant(), state.market().endTime()).getSeconds();
         orderManager.cancelOrder(laggingTokenId, CancelReason.HEDGE_DELAY, secondsToEnd, null, null);
 
-        long slowMin = Math.max(10L, cfg.completeSetHedgeDelayMinSeconds());
+        long slowMin = Math.max(0L, cfg.completeSetHedgeDelayMinSeconds());  // Allow [2-5s] bucket
         long slowMax = Math.max(slowMin, cfg.completeSetHedgeDelayMaxSeconds());
         long delaySeconds = sampleHedgeDelaySeconds(slowMin, slowMax);
         hedgeHoldUntil.put(hedgeKey(state.market(), laggingLeg), clock.instant().plusSeconds(delaySeconds));

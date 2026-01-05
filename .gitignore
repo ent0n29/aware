@@ -110,6 +110,16 @@ logs/
 *.tmp
 *.temp
 
+# Node.js / Next.js
+node_modules/
+.next/
+.nuxt/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
 # Docker
 docker-compose.override.yml
 

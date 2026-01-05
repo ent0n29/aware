@@ -1,235 +1,178 @@
-# Polybot
+# AWARE
 
-**Open-source Polymarket trading infrastructure and strategy reverse-engineering toolkit.**
+**Polymarket trading infrastructure and the AWARE Fund platform.**
 
-Polybot provides a complete trading infrastructure for [Polymarket](https://polymarket.com) prediction markets, along with powerful tools to analyze and reverse-engineer successful trading strategies from any user.
+This repository contains two integrated components:
 
-![Strategy Analysis Dashboard](docs/showcase_readme.png)
+1. **Polybot** - Java trading infrastructure for Polymarket (order execution, strategies, data ingestion)
+2. **AWARE Fund** - Python analytics platform for the "Smart Money Index" product
 
-## Features
-
-### Trading Infrastructure
-- **Executor Service**: Low-latency order execution with paper trading simulation
-- **Strategy Service**: Pluggable strategy framework for automated trading
-- **Real-time Market Data**: WebSocket integration for order book and trade feeds
-- **Position Management**: Automatic tracking, settlement, and token redemption
-- **Risk Management**: Configurable limits, kill switches, and exposure caps
-
-### Strategy Research & Reverse Engineering
-- **User Trade Analysis**: Ingest and analyze any Polymarket user's trading history
-- **Pattern Recognition**: Identify entry/exit signals, sizing rules, and timing patterns
-- **Replication Scoring**: Compare your bot's decisions against target strategies
-- **Backtesting Framework**: Test strategies against historical data
-
-### Analytics Pipeline
-- **ClickHouse Integration**: High-performance time-series analytics
-- **Event Streaming**: Kafka-based event pipeline for real-time analysis
-- **Monitoring**: Grafana dashboards and Prometheus metrics
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Polybot Architecture                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Strategy   │  │   Executor   │  │      Ingestor        │  │
-│  │   Service    │──│   Service    │  │      Service         │  │
-│  │              │  │              │  │                      │  │
-│  │ • Strategies │  │ • Order Mgmt │  │ • User Trades        │  │
-│  │ • Signals    │  │ • Simulator  │  │ • Market Data        │  │
-│  │ • Positions  │  │ • Settlement │  │ • On-chain Events    │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│         │                 │                    │                 │
-│         └─────────────────┼────────────────────┘                 │
-│                           │                                      │
-│                    ┌──────▼──────┐                               │
-│                    │    Kafka    │                               │
-│                    │   Events    │                               │
-│                    └──────┬──────┘                               │
-│                           │                                      │
-│                    ┌──────▼──────┐                               │
-│                    │ ClickHouse  │                               │
-│                    │  Analytics  │                               │
-│                    └─────────────┘                               │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+---
 
 ## Quick Start
 
 ### Prerequisites
-- Java 21+
-- Maven 3.8+
+- Java 21+ / Maven 3.8+
+- Python 3.11+
 - Docker & Docker Compose
-- Python 3.11+ (for research tools)
 
-### 1. Clone and Configure
-
-```bash
-git clone https://github.com/yourusername/polybot.git
-cd polybot
-
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your configuration
-# At minimum, set POLYMARKET_TARGET_USER to analyze
-```
-
-### 2. Start Infrastructure
+### 1. Start Infrastructure
 
 ```bash
-# Start ClickHouse and Kafka
 docker-compose -f docker-compose.analytics.yaml up -d
-
-# Optional: Start monitoring stack
-docker-compose -f docker-compose.monitoring.yaml up -d
 ```
 
-### 3. Build and Run Services
+### 2. Run Services
 
 ```bash
-# Build all services
-mvn clean package -DskipTests
-
-# Start executor (paper trading mode by default)
+# Java services (each in separate terminal)
 cd executor-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
-
-# Start strategy service (in another terminal)
 cd strategy-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
-
-# Start ingestor (in another terminal) - ingests target user's trades
 cd ingestor-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
+
+# AWARE Fund API
+cd aware-fund/services/api
+CLICKHOUSE_HOST=localhost uvicorn main:app --reload
+
+# AWARE Fund Dashboard
+cd aware-fund/services/web && npm install && npm run dev
 ```
-
-### 4. Research & Analysis
-
-```bash
-cd research
-
-# Create Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Take a snapshot of target user's data
-python snapshot_report.py
-
-# Run deep analysis
-python deep_analysis.py
-
-# Compare your bot's execution vs target
-python sim_trade_match_report.py
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `POLYMARKET_TARGET_USER` | Username to analyze/replicate | Yes (for research) |
-| `POLYMARKET_PRIVATE_KEY` | Wallet private key | For live trading |
-| `POLYMARKET_API_KEY` | API credentials | For live trading |
-| `ANALYTICS_DB_URL` | ClickHouse connection | For analytics |
-
-See [.env.example](.env.example) for complete configuration reference.
-
-### Trading Modes
-
-| Mode | Description |
-|------|-------------|
-| `PAPER` | Simulated trading (default) |
-| `LIVE` | Real money trading |
-
-## Services
-
-### Executor Service (Port 8080)
-Handles order execution, position management, and settlement.
-
-```bash
-# API Examples
-curl http://localhost:8080/api/polymarket/health
-curl http://localhost:8080/api/polymarket/positions
-curl http://localhost:8080/api/polymarket/settlement/plan
-```
-
-### Strategy Service (Port 8081)
-Runs trading strategies and generates signals.
-
-```bash
-curl http://localhost:8081/api/strategy/status
-```
-
-### Ingestor Service (Port 8082)
-Ingests market data and user trades into ClickHouse.
-
-### Analytics Service (Port 8083)
-Provides analytics APIs over ClickHouse data.
-
-## Included Strategy: Complete-Set Arbitrage
-
-The repository includes a fully-implemented **complete-set arbitrage strategy** for Polymarket Up/Down binary markets:
-
-- **Edge Detection**: Identifies when UP + DOWN prices sum to less than $1
-- **Inventory Skewing**: Adjusts quotes to balance positions
-- **Fast Top-Up**: Quickly completes pairs after partial fills
-- **Taker Mode**: Crosses spread when edge is favorable
-
-See [docs/EXAMPLE_STRATEGY_SPEC.md](docs/EXAMPLE_STRATEGY_SPEC.md) for detailed documentation.
-
-## Research Tools
-
-The `research/` directory contains Python tools for strategy analysis:
-
-| Script | Purpose |
-|--------|---------|
-| `snapshot_report.py` | Take data snapshots for analysis |
-| `deep_analysis.py` | Comprehensive strategy analysis |
-| `replication_score.py` | Score how well you're replicating |
-| `sim_trade_match_report.py` | Compare sim vs target execution |
-| `paper_trading_dashboard.py` | Jupyter dashboard for monitoring |
-
-## Project Structure
-
-```
-polybot/
-├── executor-service/       # Order execution & settlement
-├── strategy-service/       # Trading strategies
-├── ingestor-service/       # Data ingestion
-├── analytics-service/      # Analytics APIs
-├── polybot-core/           # Shared libraries
-├── research/               # Python analysis tools
-├── docs/                   # Documentation
-└── monitoring/             # Grafana/Prometheus configs
-```
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Ideas for Contribution
-- New trading strategies
-- Additional market types support
-- Improved analytics and visualizations
-- Better backtesting framework
-- More reverse-engineering tools
-
-## Disclaimer
-
-**This software is for educational and research purposes only.**
-
-- Trading prediction markets involves significant financial risk
-- Past performance does not guarantee future results
-- You are solely responsible for your trading decisions
-- Always start with paper trading before using real funds
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-**Built with curiosity about how successful traders operate on Polymarket.**
+## Architecture
+
+```
+aware/
+├── polybot-core/           # Shared Java library (APIs, WebSocket, events)
+├── executor-service/       # Order execution, paper trading, settlement
+├── strategy-service/       # Trading strategies + Fund mirror engine
+├── ingestor-service/       # Market data & trade ingestion
+├── analytics-service/      # ClickHouse schemas
+├── research/               # Python research & analysis tools
+└── aware-fund/             # AWARE Fund product
+    ├── services/analytics/ # Smart Money scoring, PSI indices
+    ├── services/api/       # FastAPI (40+ endpoints)
+    └── services/web/       # Next.js dashboard
+```
+
+---
+
+## Components
+
+### Polybot (Trading Infrastructure)
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| executor-service | 8080 | Order execution, simulation, settlement |
+| strategy-service | 8081 | Trading strategies, fund mirroring |
+| ingestor-service | 8082 | Market data ingestion |
+
+### AWARE Fund (Analytics Platform)
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Python API | 8000 | Leaderboard, indices, alerts, fund data |
+| Next.js Dashboard | 3000 | Visualization UI |
+
+---
+
+## AWARE Fund Product
+
+> *"Don't bet on outcomes. Bet on the best traders being right."*
+
+The AWARE Fund is a "Smart Money Index" for Polymarket - passive investment products that mirror top traders.
+
+### PSI Indices (Polymarket Smart Index)
+
+| Index | Description |
+|-------|-------------|
+| PSI-10 | Top 10 traders by Smart Money Score |
+| PSI-CRYPTO | Top crypto market specialists |
+| PSI-POLITICS | Top political forecasters |
+| PSI-SPORTS | Top sports bettors |
+
+### Smart Money Score (0-100)
+
+```
+Score = 0.40 × Profitability     (P&L percentile)
+      + 0.30 × Risk-Adjusted     (Sharpe ratio)
+      + 0.20 × Consistency       (win rate - variance)
+      + 0.10 × Track Record      (days active + trades)
+```
+
+### API Endpoints
+
+```bash
+# Leaderboard
+curl localhost:8000/api/leaderboard
+
+# PSI Index
+curl localhost:8000/api/indices/PSI-10
+
+# Fund NAV
+curl localhost:8000/api/fund/nav
+
+# Discovery
+curl localhost:8000/api/discovery/hidden-gems
+
+# Insider Alerts
+curl localhost:8000/api/insider/alerts
+```
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [CLAUDE.md](CLAUDE.md) | AI assistant context & commands |
+| [aware-fund/VISION.md](aware-fund/VISION.md) | Product vision & architecture |
+| [aware-fund/ACTION_PLAN.md](aware-fund/ACTION_PLAN.md) | Implementation progress |
+| [docs/EXAMPLE_STRATEGY_SPEC.md](docs/EXAMPLE_STRATEGY_SPEC.md) | Strategy implementation guide |
+
+---
+
+## Development
+
+### Build
+
+```bash
+mvn clean package -DskipTests
+```
+
+### Test
+
+```bash
+mvn test
+mvn test -pl strategy-service -Dtest=GabagoolDirectionalEngineTest
+```
+
+### Research Tools
+
+```bash
+cd research && source .venv/bin/activate
+python snapshot_report.py          # Data snapshots
+python deep_analysis.py            # Strategy analysis
+python sim_trade_match_report.py   # Replication scoring
+```
+
+---
+
+## Status
+
+| Component | Status |
+|-----------|--------|
+| Trading Infrastructure | Production |
+| Data Ingestion | Production |
+| Smart Money Scoring | Complete |
+| PSI Indices | Complete |
+| Fund Mirror Engine | Complete |
+| Dashboard | Basic |
+| Smart Contracts | Pending |
+
+---
+
+## License
+
+Proprietary - All rights reserved.

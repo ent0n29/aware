@@ -316,38 +316,4 @@ PARTITION BY toYYYYMM(calculated_at)
 ORDER BY (proxy_address, calculated_at);
 
 -- Combined leaderboard view with both rule-based and ML scores
--- Note: ClickHouse LEFT JOIN returns 0/empty string for non-matches, not NULL
--- So we use if(ml.proxy_address = '', ...) instead of coalesce()
--- Updated: Now joins aware_trader_pnl to get actual win_rate from P&L calculations
-CREATE OR REPLACE VIEW polybot.aware_leaderboard_ml AS
-SELECT
-  if(ml.proxy_address = '', s.rank, ml.rank) AS rank,
-  s.username AS username,
-  p.pseudonym AS pseudonym,
-  s.proxy_address AS proxy_address,
-  -- Use ML score if available, fallback to rule-based
-  if(ml.proxy_address = '', toFloat32(s.total_score), ml.ml_score) AS smart_money_score,
-  if(ml.proxy_address = '', s.tier, ml.ml_tier) AS tier,
-  if(ml.proxy_address = '', 0.0, ml.tier_confidence) AS tier_confidence,
-  if(ml.proxy_address = '', 0.0, ml.predicted_sharpe_30d) AS predicted_sharpe_30d,
-  -- Features: prefer ML, fallback to P&L-calculated metrics
-  if(ml.proxy_address = '', 0.0, ml.sharpe_ratio) AS sharpe_ratio,
-  if(ml.proxy_address != '', ml.win_rate, if(pnl.proxy_address != '', pnl.win_rate, 0.0)) AS win_rate,
-  if(ml.proxy_address = '', 0.0, ml.max_drawdown) AS max_drawdown,
-  if(ml.proxy_address = '', 0.0, ml.maker_ratio) AS maker_ratio,
-  -- Profile data
-  p.total_pnl AS total_pnl,
-  p.total_volume_usd AS total_volume,
-  s.strategy_type AS strategy_type,
-  s.strategy_confidence AS strategy_confidence,
-  -- Metadata
-  if(ml.proxy_address = '', 'rule-based', ml.model_version) AS model_version,
-  s.calculated_at AS calculated_at
-FROM (SELECT * FROM polybot.aware_smart_money_scores FINAL) AS s
-LEFT JOIN (SELECT * FROM polybot.aware_trader_profiles FINAL) AS p
-  ON s.proxy_address = p.proxy_address
-LEFT JOIN (SELECT * FROM polybot.aware_ml_scores FINAL) AS ml
-  ON s.proxy_address = ml.proxy_address
-LEFT JOIN (SELECT * FROM polybot.aware_trader_pnl FINAL) AS pnl
-  ON s.proxy_address = pnl.proxy_address
-ORDER BY rank ASC;
+-- NOTE: Moved to 102_psi_views.sql to run after 101_resolutions.sql creates aware_trader_pnl

@@ -17,16 +17,25 @@ import {
   X,
   PieChart,
   AlertTriangle,
+  Layers,
+  Wallet,
+  Brain,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Fund', href: '/fund', icon: PieChart },
+  { name: 'All Funds', href: '/funds', icon: Layers },
+  { name: 'Invest', href: '/invest', icon: Wallet },
   { name: 'Leaderboard', href: '/leaderboard', icon: Trophy },
   { name: 'PSI Indices', href: '/indices', icon: LineChart },
   { name: 'Consensus', href: '/consensus', icon: Users },
   { name: 'Discovery', href: '/discovery', icon: Sparkles },
-  { name: 'Insider Alerts', href: '/insider-alerts', icon: AlertTriangle },
+  { name: 'Alerts', href: '/insider-alerts', icon: AlertTriangle },
+]
+
+const adminNav = [
+  { name: 'ML Status', href: '/admin/ml', icon: Brain },
 ]
 
 const secondaryNav = [
@@ -122,7 +131,31 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
               })}
             </div>
 
-            <div className="pt-8">
+            <div className="pt-6">
+              <p className="px-3 text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
+                Admin
+              </p>
+              {adminNav.map((item) => {
+                const isActive = pathname === item.href || pathname.startsWith(item.href)
+                return (
+                  <Link
+                    key={item.name}
+                    href={item.href}
+                    className={cn(
+                      'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200',
+                      isActive
+                        ? 'bg-purple-500/20 text-purple-400'
+                        : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
+                    )}
+                  >
+                    <item.icon className={cn('w-5 h-5', isActive && 'text-purple-400')} />
+                    {item.name}
+                  </Link>
+                )
+              })}
+            </div>
+
+            <div className="pt-4">
               <p className="px-3 text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
                 Other
               </p>

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import {
   TrendingUp,
   Users,
@@ -10,6 +11,11 @@ import {
   ArrowDownRight,
   Loader2,
   AlertCircle,
+  Wallet,
+  Brain,
+  CheckCircle,
+  AlertTriangle,
+  XCircle,
 } from 'lucide-react'
 import { cn, formatNumber, formatCurrency, formatPercent } from '@/lib/utils'
 import { StatsCard } from '@/components/dashboard/StatsCard'
@@ -17,11 +23,12 @@ import { TopTraders } from '@/components/dashboard/TopTraders'
 import { RecentActivity } from '@/components/dashboard/RecentActivity'
 import { IndexPerformance } from '@/components/dashboard/IndexPerformance'
 import { ConsensusAlerts } from '@/components/dashboard/ConsensusAlerts'
-import { api, DashboardStats, PSIIndex } from '@/lib/api'
+import { api, DashboardStats, PSIIndex, MLHealthResponse } from '@/lib/api'
 
 interface DashboardData {
   stats: DashboardStats | null
   psi10: PSIIndex | null
+  mlHealth: MLHealthResponse | null
   error: string | null
   isLoading: boolean
 }
@@ -30,6 +37,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData>({
     stats: null,
     psi10: null,
+    mlHealth: null,
     error: null,
     isLoading: true,
   })
@@ -37,15 +45,17 @@ export default function DashboardPage() {
   useEffect(() => {
     async function fetchDashboardData() {
       try {
-        // Fetch stats and PSI-10 in parallel
-        const [statsData, psi10Data] = await Promise.allSettled([
+        // Fetch stats, PSI-10, and ML health in parallel
+        const [statsData, psi10Data, mlHealthData] = await Promise.allSettled([
           api.getDashboardStats(),
           api.getPSI10(),
+          api.getMLHealth(),
         ])
 
         setData({
           stats: statsData.status === 'fulfilled' ? statsData.value : null,
           psi10: psi10Data.status === 'fulfilled' ? psi10Data.value : null,
+          mlHealth: mlHealthData.status === 'fulfilled' ? mlHealthData.value : null,
           error: null,
           isLoading: false,
         })
@@ -53,6 +63,7 @@ export default function DashboardPage() {
         setData({
           stats: null,
           psi10: null,
+          mlHealth: null,
           error: 'Failed to load dashboard data. Make sure the API server is running.',
           isLoading: false,
         })
@@ -62,7 +73,7 @@ export default function DashboardPage() {
     fetchDashboardData()
   }, [])
 
-  const { stats, psi10, error, isLoading } = data
+  const { stats, psi10, mlHealth, error, isLoading } = data
 
   // Fallback values for display
   const displayStats = stats || {
@@ -172,6 +183,79 @@ export default function DashboardPage() {
         {/* Background decoration */}
         <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/4" />
         <div className="absolute bottom-0 left-0 w-48 h-48 bg-cyan-400/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/4" />
+      </div>
+
+      {/* Investor CTA + ML Status Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Investor CTA */}
+        <div className="lg:col-span-2 rounded-xl bg-gradient-to-r from-green-500/10 to-emerald-500/10 border border-green-500/20 p-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="p-3 rounded-xl bg-green-500/20">
+                <Wallet className="h-6 w-6 text-green-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-white text-lg">Start Investing in Smart Money</h3>
+                <p className="text-sm text-slate-400 mt-1">
+                  Deposit USDC to mirror top traders' positions automatically
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/invest"
+              className="px-6 py-2.5 bg-gradient-to-r from-green-500 to-emerald-500 text-white font-medium rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2"
+            >
+              <Wallet className="w-4 h-4" />
+              Invest Now
+            </Link>
+          </div>
+        </div>
+
+        {/* ML Status Indicator */}
+        <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Brain className="w-5 h-5 text-purple-400" />
+              <span className="text-sm font-medium text-slate-300">ML Pipeline</span>
+            </div>
+            <Link href="/admin/ml" className="text-xs text-aware-400 hover:text-aware-300">
+              Details →
+            </Link>
+          </div>
+          {mlHealth ? (
+            <div className="flex items-center gap-3">
+              <div className={cn(
+                'flex items-center gap-2 px-3 py-1.5 rounded-lg',
+                mlHealth.status === 'healthy' ? 'bg-green-500/20' :
+                mlHealth.status === 'degraded' ? 'bg-yellow-500/20' : 'bg-red-500/20'
+              )}>
+                {mlHealth.status === 'healthy' ? (
+                  <CheckCircle className="w-4 h-4 text-green-400" />
+                ) : mlHealth.status === 'degraded' ? (
+                  <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-red-400" />
+                )}
+                <span className={cn(
+                  'text-sm font-medium capitalize',
+                  mlHealth.status === 'healthy' ? 'text-green-400' :
+                  mlHealth.status === 'degraded' ? 'text-yellow-400' : 'text-red-400'
+                )}>
+                  {mlHealth.status}
+                </span>
+              </div>
+              <div className="text-xs text-slate-500">
+                <span className="font-mono">{mlHealth.model_version}</span>
+                <span className="mx-2">·</span>
+                <span>{formatNumber(mlHealth.traders_scored, 0)} scored</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-slate-500">
+              {isLoading ? 'Loading...' : 'Not available'}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Main Content Grid */}

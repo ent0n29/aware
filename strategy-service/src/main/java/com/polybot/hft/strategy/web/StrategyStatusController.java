@@ -2,6 +2,7 @@ package com.polybot.hft.strategy.web;
 
 import com.polybot.hft.config.HftProperties;
 import com.polybot.hft.polymarket.fund.service.FundPositionMirror;
+import com.polybot.hft.polymarket.fund.service.FundRegistry;
 import com.polybot.hft.polymarket.fund.service.FundTradeListener;
 import com.polybot.hft.polymarket.strategy.GabagoolDirectionalEngine;
 import com.polybot.hft.polymarket.ws.ClobMarketWebSocketClient;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -30,6 +32,7 @@ public class StrategyStatusController {
   // Optional fund components (only present when hft.fund.enabled=true)
   private final FundTradeListener fundTradeListener;
   private final FundPositionMirror fundPositionMirror;
+  private final FundRegistry fundRegistry;
 
   @Autowired
   public StrategyStatusController(
@@ -38,7 +41,8 @@ public class StrategyStatusController {
       ClobMarketWebSocketClient marketWs,
       GabagoolDirectionalEngine gabagoolEngine,
       @Autowired(required = false) FundTradeListener fundTradeListener,
-      @Autowired(required = false) FundPositionMirror fundPositionMirror
+      @Autowired(required = false) FundPositionMirror fundPositionMirror,
+      @Autowired(required = false) FundRegistry fundRegistry
   ) {
     this.properties = properties;
     this.environment = environment;
@@ -46,6 +50,7 @@ public class StrategyStatusController {
     this.gabagoolEngine = gabagoolEngine;
     this.fundTradeListener = fundTradeListener;
     this.fundPositionMirror = fundPositionMirror;
+    this.fundRegistry = fundRegistry;
   }
 
   @GetMapping("/status")
@@ -120,6 +125,57 @@ public class StrategyStatusController {
     } else {
       response.put("positionMirrorMetrics", "NOT AVAILABLE - Bean not created");
     }
+
+    return ResponseEntity.ok(response);
+  }
+
+  /**
+   * Get status of all registered funds (multi-fund view).
+   */
+  @GetMapping("/funds/all")
+  public ResponseEntity<Map<String, Object>> allFundsStatus() {
+    Map<String, Object> response = new HashMap<>();
+
+    if (fundRegistry == null) {
+      response.put("enabled", false);
+      response.put("message", "Fund system not enabled");
+      return ResponseEntity.ok(response);
+    }
+
+    response.put("enabled", true);
+
+    // Get all funds
+    List<Map<String, Object>> funds = fundRegistry.getAllFunds().stream()
+        .map(fund -> {
+          Map<String, Object> fundInfo = new HashMap<>();
+          fundInfo.put("fundId", fund.fundId());
+          fundInfo.put("type", fund.type().getId());
+          fundInfo.put("category", fund.type().isMirrorFund() ? "MIRROR" : "ACTIVE");
+          fundInfo.put("capitalUsd", fund.capitalUsd());
+          fundInfo.put("realizedPnl", fund.realizedPnl());
+          fundInfo.put("unrealizedPnl", fund.unrealizedPnl());
+          fundInfo.put("totalPnl", fund.totalPnl());
+          fundInfo.put("returnPct", fund.returnPct());
+          fundInfo.put("nav", fund.nav());
+          fundInfo.put("openPositions", fund.openPositions());
+          fundInfo.put("startedAt", fund.startedAt().toString());
+          return fundInfo;
+        })
+        .toList();
+
+    response.put("funds", funds);
+    response.put("fundCount", funds.size());
+
+    // Aggregate metrics
+    FundRegistry.AggregateMetrics aggregate = fundRegistry.getAggregateMetrics();
+    Map<String, Object> aggregateMap = new HashMap<>();
+    aggregateMap.put("totalCapital", aggregate.totalCapital());
+    aggregateMap.put("totalRealizedPnl", aggregate.totalRealizedPnl());
+    aggregateMap.put("totalUnrealizedPnl", aggregate.totalUnrealizedPnl());
+    aggregateMap.put("totalPnl", aggregate.totalPnl());
+    aggregateMap.put("totalNav", aggregate.totalNav());
+    aggregateMap.put("totalOpenPositions", aggregate.totalOpenPositions());
+    response.put("aggregate", aggregateMap);
 
     return ResponseEntity.ok(response);
   }

@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import {
   TrendingUp,
   TrendingDown,
@@ -13,8 +15,11 @@ import {
   AlertCircle,
   ArrowUpRight,
   ArrowDownRight,
+  ChevronDown,
+  Zap,
 } from 'lucide-react'
 import { cn, formatCurrency, formatNumber } from '@/lib/utils'
+import { NAVChart } from '@/components/fund/NAVChart'
 
 // Types
 interface FundOverview {
@@ -50,27 +55,33 @@ interface IndexConstituent {
   strategy_type: string
 }
 
-// Mock data for now (API endpoints will be added)
-// Note: Use empty string for last_updated to avoid hydration mismatch
-const mockOverview: FundOverview = {
-  fund_id: 'psi-10-main',
-  nav: 10000,
-  capital: 10000,
-  position_value: 0,
-  unrealized_pnl: 0,
-  realized_pnl: 0,
-  total_return: 0,
-  open_positions: 0,
-  num_traders: 10,
-  last_updated: '',  // Set client-side to avoid SSR mismatch
-}
+// Fund type configurations
+const fundTypes = [
+  { id: 'PSI-10', name: 'PSI-10', type: 'MIRROR', description: 'Top 10 Smart Money traders' },
+  { id: 'PSI-25', name: 'PSI-25', type: 'MIRROR', description: 'Top 25 Smart Money traders' },
+  { id: 'PSI-CRYPTO', name: 'PSI-CRYPTO', type: 'MIRROR', description: 'Crypto market specialists' },
+  { id: 'PSI-POLITICS', name: 'PSI-POLITICS', type: 'MIRROR', description: 'Political markets experts' },
+  { id: 'PSI-SPORTS', name: 'PSI-SPORTS', type: 'MIRROR', description: 'Sports betting specialists' },
+  { id: 'ALPHA-ARB', name: 'ALPHA-ARB', type: 'ACTIVE', description: 'Complete-set arbitrage' },
+  { id: 'ALPHA-INSIDER', name: 'ALPHA-INSIDER', type: 'ACTIVE', description: 'Insider activity signals' },
+  { id: 'ALPHA-EDGE', name: 'ALPHA-EDGE', type: 'ACTIVE', description: 'ML edge predictions' },
+]
 
 export default function FundPage() {
-  const [overview, setOverview] = useState<FundOverview>(mockOverview)
+  const searchParams = useSearchParams()
+  const typeParam = searchParams.get('type') || 'PSI-10'
+
+  const [selectedFund, setSelectedFund] = useState(typeParam)
+  const [showFundSelector, setShowFundSelector] = useState(false)
+  const [overview, setOverview] = useState<FundOverview | null>(null)
   const [positions, setPositions] = useState<FundPosition[]>([])
   const [constituents, setConstituents] = useState<IndexConstituent[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Get current fund config
+  const currentFund = fundTypes.find(f => f.id === selectedFund) || fundTypes[0]
+  const isMirrorFund = currentFund.type === 'MIRROR'
 
   useEffect(() => {
     async function fetchFundData() {
@@ -78,66 +89,84 @@ export default function FundPage() {
         setIsLoading(true)
         setError(null)
 
-        // API base URL (use environment variable in production)
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
-        // Fetch fund overview
-        const navResponse = await fetch(`${API_BASE}/api/fund/nav`)
+        // Fetch fund overview with fund type
+        const navResponse = await fetch(`${API_BASE}/api/fund/nav?fund_id=${selectedFund}`)
         if (navResponse.ok) {
           const navData = await navResponse.json()
           setOverview({
-            fund_id: navData.fund_id,
-            nav: navData.nav,
-            capital: navData.capital,
-            position_value: navData.position_value,
-            unrealized_pnl: navData.unrealized_pnl,
-            realized_pnl: navData.realized_pnl,
-            total_return: navData.total_return,
-            open_positions: navData.open_positions,
-            num_traders: 10,  // Will be fetched from index
+            fund_id: navData.fund_id || selectedFund,
+            nav: navData.nav || 10000,
+            capital: navData.capital || 10000,
+            position_value: navData.position_value || 0,
+            unrealized_pnl: navData.unrealized_pnl || 0,
+            realized_pnl: navData.realized_pnl || 0,
+            total_return: navData.total_return || 0,
+            open_positions: navData.open_positions || 0,
+            num_traders: navData.num_traders || (selectedFund.includes('10') ? 10 : selectedFund.includes('25') ? 25 : 0),
             last_updated: navData.last_updated || new Date().toISOString(),
+          })
+        } else {
+          // Set default values if API not available
+          setOverview({
+            fund_id: selectedFund,
+            nav: 10000,
+            capital: 10000,
+            position_value: 0,
+            unrealized_pnl: 0,
+            realized_pnl: 0,
+            total_return: 0,
+            open_positions: 0,
+            num_traders: selectedFund.includes('10') ? 10 : selectedFund.includes('25') ? 25 : 0,
+            last_updated: new Date().toISOString(),
           })
         }
 
         // Fetch positions
-        const posResponse = await fetch(`${API_BASE}/api/fund/positions`)
+        const posResponse = await fetch(`${API_BASE}/api/fund/positions?fund_id=${selectedFund}`)
         if (posResponse.ok) {
           const posData = await posResponse.json()
-          // API returns array directly, not wrapped in positions key
           setPositions(Array.isArray(posData) ? posData : posData.positions || [])
+        } else {
+          setPositions([])
         }
 
-        // Fetch index constituents
-        const indexResponse = await fetch(`${API_BASE}/api/fund/index?index_type=PSI-10`)
-        if (indexResponse.ok) {
-          const indexData = await indexResponse.json()
-          const mappedConstituents = (indexData.constituents || []).map((c: any) => ({
-            username: c.username,
-            weight: c.weight / 100,  // API returns percentage, convert to decimal
-            total_score: c.smart_money_score,
-            sharpe_ratio: c.sharpe_ratio,
-            strategy_type: c.strategy_type,
-          }))
-          setConstituents(mappedConstituents)
+        // Fetch index constituents for MIRROR funds
+        if (isMirrorFund) {
+          const indexResponse = await fetch(`${API_BASE}/api/fund/index?index_type=${selectedFund}`)
+          if (indexResponse.ok) {
+            const indexData = await indexResponse.json()
+            const mappedConstituents = (indexData.constituents || []).map((c: any) => ({
+              username: c.username,
+              weight: c.weight / 100,
+              total_score: c.smart_money_score,
+              sharpe_ratio: c.sharpe_ratio,
+              strategy_type: c.strategy_type,
+            }))
+            setConstituents(mappedConstituents)
+          } else {
+            setConstituents([])
+          }
+        } else {
+          setConstituents([])
         }
 
       } catch (err) {
         console.error('Fund data fetch error:', err)
-        // Use mock data if API not available
-        setOverview(mockOverview)
+        setError('Failed to load fund data')
       } finally {
         setIsLoading(false)
       }
     }
 
     fetchFundData()
-    // Refresh every 30 seconds
     const interval = setInterval(fetchFundData, 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [selectedFund, isMirrorFund])
 
-  const totalReturn = overview.nav - overview.capital
-  const returnPct = overview.capital > 0 ? (totalReturn / overview.capital) * 100 : 0
+  const totalReturn = overview ? overview.nav - overview.capital : 0
+  const returnPct = overview && overview.capital > 0 ? (totalReturn / overview.capital) * 100 : 0
   const isPositive = totalReturn >= 0
 
   return (
@@ -146,31 +175,88 @@ export default function FundPage() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white flex items-center gap-3">
-            <PieChart className="h-7 w-7 text-aware-400" />
-            AWARE Fund
+            {isMirrorFund ? (
+              <Users className="h-7 w-7 text-blue-400" />
+            ) : (
+              <Zap className="h-7 w-7 text-purple-400" />
+            )}
+            {currentFund.name} Fund
           </h1>
           <p className="text-slate-400 mt-1">
-            PSI-10 Smart Money Index Fund
+            {currentFund.description}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="px-3 py-1 rounded-full bg-green-500/10 text-green-400 text-sm font-medium">
-            Active
-          </span>
-          <span className="text-xs text-slate-500" suppressHydrationWarning>
-            {overview.last_updated ? `Updated ${new Date(overview.last_updated).toLocaleTimeString()}` : 'Loading...'}
-          </span>
+        {/* Fund Selector */}
+        <div className="relative">
+          <button
+            onClick={() => setShowFundSelector(!showFundSelector)}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors"
+          >
+            <span className={cn(
+              'text-xs px-2 py-0.5 rounded-full',
+              isMirrorFund ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+            )}>
+              {currentFund.type}
+            </span>
+            <span className="text-white font-medium">{currentFund.name}</span>
+            <ChevronDown className={cn(
+              'w-4 h-4 text-slate-400 transition-transform',
+              showFundSelector && 'rotate-180'
+            )} />
+          </button>
+
+          {showFundSelector && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setShowFundSelector(false)}
+              />
+              <div className="absolute right-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 overflow-hidden">
+                {fundTypes.map((fund) => (
+                  <button
+                    key={fund.id}
+                    onClick={() => {
+                      setSelectedFund(fund.id)
+                      setShowFundSelector(false)
+                    }}
+                    className={cn(
+                      'w-full px-4 py-3 text-left hover:bg-slate-700/50 transition-colors flex items-center justify-between',
+                      selectedFund === fund.id && 'bg-aware-500/10'
+                    )}
+                  >
+                    <div>
+                      <p className="text-white font-medium">{fund.name}</p>
+                      <p className="text-xs text-slate-500">{fund.description}</p>
+                    </div>
+                    <span className={cn(
+                      'text-xs px-2 py-0.5 rounded-full',
+                      fund.type === 'MIRROR' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+                    )}>
+                      {fund.type}
+                    </span>
+                  </button>
+                ))}
+
+                <div className="border-t border-slate-700 p-2">
+                  <Link
+                    href="/funds"
+                    className="block w-full px-3 py-2 text-sm text-aware-400 hover:text-aware-300 text-center"
+                  >
+                    View All Funds →
+                  </Link>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* Error State */}
       {error && (
-        <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-6 flex items-center gap-4">
-          <AlertCircle className="h-6 w-6 text-red-400" />
-          <div>
-            <p className="text-red-400 font-medium">{error}</p>
-          </div>
+        <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 flex items-center gap-3">
+          <AlertCircle className="h-5 w-5 text-red-400" />
+          <p className="text-red-400">{error}</p>
         </div>
       )}
 
@@ -182,10 +268,15 @@ export default function FundPage() {
         </div>
       )}
 
-      {!isLoading && (
+      {!isLoading && overview && (
         <>
           {/* NAV Card - Hero */}
-          <div className="rounded-xl bg-gradient-to-br from-aware-500/20 to-aware-600/10 border border-aware-500/30 p-6">
+          <div className={cn(
+            'rounded-xl border p-6',
+            isMirrorFund
+              ? 'bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border-blue-500/30'
+              : 'bg-gradient-to-br from-purple-500/10 to-violet-500/10 border-purple-500/30'
+          )}>
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
               <div>
                 <p className="text-slate-400 text-sm">Net Asset Value (NAV)</p>
@@ -229,6 +320,15 @@ export default function FundPage() {
             </div>
           </div>
 
+          {/* NAV Chart */}
+          <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-6">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <Activity className="w-5 h-5 text-aware-400" />
+              NAV History
+            </h3>
+            <NAVChart fundId={selectedFund} height={300} />
+          </div>
+
           {/* Stats Grid */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
@@ -255,17 +355,19 @@ export default function FundPage() {
               </p>
             </div>
 
-            <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="p-2 rounded-lg bg-purple-500/10">
-                  <Users className="h-5 w-5 text-purple-400" />
+            {isMirrorFund && (
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="p-2 rounded-lg bg-purple-500/10">
+                    <Users className="h-5 w-5 text-purple-400" />
+                  </div>
+                  <span className="text-slate-400 text-sm">Tracked Traders</span>
                 </div>
-                <span className="text-slate-400 text-sm">Tracked Traders</span>
+                <p className="text-2xl font-bold text-white">
+                  {overview.num_traders}
+                </p>
               </div>
-              <p className="text-2xl font-bold text-white">
-                {overview.num_traders}
-              </p>
-            </div>
+            )}
 
             <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
               <div className="flex items-center gap-3 mb-2">
@@ -299,16 +401,18 @@ export default function FundPage() {
                   <Activity className="h-12 w-12 text-slate-600 mx-auto mb-4" />
                   <p className="text-slate-400">No open positions</p>
                   <p className="text-sm text-slate-500 mt-1">
-                    Fund will open positions when traders in the index trade
+                    {isMirrorFund
+                      ? 'Fund will open positions when tracked traders trade'
+                      : 'Waiting for trading signals'}
                   </p>
                 </div>
               ) : (
-                <div className="divide-y divide-slate-800">
+                <div className="divide-y divide-slate-800 max-h-96 overflow-y-auto">
                   {positions.map((pos) => (
                     <div key={pos.token_id} className="p-4 hover:bg-slate-800/30">
                       <div className="flex justify-between items-start">
                         <div>
-                          <p className="text-white font-medium">{pos.market_slug}</p>
+                          <p className="text-white font-medium truncate max-w-[200px]">{pos.market_slug}</p>
                           <p className="text-sm text-slate-400">
                             {formatNumber(pos.shares, 2)} shares @ {pos.outcome}
                           </p>
@@ -331,75 +435,142 @@ export default function FundPage() {
               )}
             </div>
 
-            {/* Index Constituents */}
-            <div className="rounded-xl bg-slate-900/50 border border-slate-800 overflow-hidden">
-              <div className="p-4 border-b border-slate-800">
-                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                  <Users className="h-5 w-5 text-aware-400" />
-                  PSI-10 Constituents
-                </h2>
-              </div>
-
-              {constituents.length === 0 ? (
-                <div className="p-8 text-center">
-                  <Users className="h-12 w-12 text-slate-600 mx-auto mb-4" />
-                  <p className="text-slate-400">No index data</p>
-                  <p className="text-sm text-slate-500 mt-1">
-                    Run the analytics pipeline to build the index
-                  </p>
+            {/* Index Constituents (for MIRROR funds) or Strategy Info (for ACTIVE funds) */}
+            {isMirrorFund ? (
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 overflow-hidden">
+                <div className="p-4 border-b border-slate-800">
+                  <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <Users className="h-5 w-5 text-aware-400" />
+                    {currentFund.name} Constituents
+                  </h2>
                 </div>
-              ) : (
-                <div className="divide-y divide-slate-800">
-                  {constituents.map((c, i) => (
-                    <div key={c.username} className="p-4 hover:bg-slate-800/30 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className="text-slate-500 font-medium w-6">{i + 1}</span>
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-aware-400 to-aware-600 flex items-center justify-center text-white text-sm font-bold">
-                          {c.username.charAt(0).toUpperCase()}
+
+                {constituents.length === 0 ? (
+                  <div className="p-8 text-center">
+                    <Users className="h-12 w-12 text-slate-600 mx-auto mb-4" />
+                    <p className="text-slate-400">No index data</p>
+                    <p className="text-sm text-slate-500 mt-1">
+                      Run the analytics pipeline to build the index
+                    </p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-800 max-h-96 overflow-y-auto">
+                    {constituents.map((c, i) => (
+                      <div key={c.username} className="p-4 hover:bg-slate-800/30 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="text-slate-500 font-medium w-6">{i + 1}</span>
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-aware-400 to-aware-600 flex items-center justify-center text-white text-sm font-bold">
+                            {c.username.charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="text-white font-medium">{c.username}</p>
+                            <p className="text-xs text-slate-500">{c.strategy_type}</p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-white font-medium">
+                            {(c.weight * 100).toFixed(1)}%
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            Score: {c.total_score.toFixed(0)}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 overflow-hidden">
+                <div className="p-4 border-b border-slate-800">
+                  <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <Zap className="h-5 w-5 text-purple-400" />
+                    Strategy Details
+                  </h2>
+                </div>
+                <div className="p-6">
+                  <div className="space-y-4">
+                    {selectedFund === 'ALPHA-ARB' && (
+                      <>
+                        <div>
+                          <p className="text-slate-400 text-sm">Strategy Type</p>
+                          <p className="text-white font-medium">Complete-Set Arbitrage</p>
                         </div>
                         <div>
-                          <p className="text-white font-medium">{c.username}</p>
-                          <p className="text-xs text-slate-500">{c.strategy_type}</p>
+                          <p className="text-slate-400 text-sm">Description</p>
+                          <p className="text-white">Exploits price discrepancies by buying complete sets when outcomes sum to less than $1</p>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-white font-medium">
-                          {(c.weight * 100).toFixed(1)}%
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          Score: {c.total_score.toFixed(0)}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
+                      </>
+                    )}
+                    {selectedFund === 'ALPHA-INSIDER' && (
+                      <>
+                        <div>
+                          <p className="text-slate-400 text-sm">Strategy Type</p>
+                          <p className="text-white font-medium">Insider Activity Detection</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-sm">Description</p>
+                          <p className="text-white">Follows unusual trading patterns that suggest informed trading activity</p>
+                        </div>
+                      </>
+                    )}
+                    {selectedFund === 'ALPHA-EDGE' && (
+                      <>
+                        <div>
+                          <p className="text-slate-400 text-sm">Strategy Type</p>
+                          <p className="text-white font-medium">ML Edge Predictions</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-sm">Description</p>
+                          <p className="text-white">Uses machine learning to identify high-probability trading opportunities</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
 
           {/* Fund Info */}
           <div className="rounded-xl bg-slate-800/30 border border-slate-800 p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">About the Fund</h3>
+            <h3 className="text-lg font-semibold text-white mb-4">About This Fund</h3>
             <div className="grid md:grid-cols-3 gap-6 text-sm">
               <div>
                 <p className="text-slate-400">Strategy</p>
-                <p className="text-white mt-1">
-                  Mirrors the top 10 traders by Smart Money Score, weighted equally
-                </p>
+                <p className="text-white mt-1">{currentFund.description}</p>
               </div>
               <div>
                 <p className="text-slate-400">Execution</p>
                 <p className="text-white mt-1">
-                  5-second delay after detecting trader trades, limit orders with market fallback
+                  {isMirrorFund
+                    ? '5-second delay after detecting trader trades, limit orders with market fallback'
+                    : 'Algorithmic execution based on strategy signals'}
                 </p>
               </div>
               <div>
                 <p className="text-slate-400">Risk Controls</p>
                 <p className="text-white mt-1">
-                  Max 10% per position, $1,000 max market exposure, 10% max drawdown
+                  Max 10% per position, 10% max drawdown circuit breaker
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Quick Actions */}
+          <div className="flex justify-center gap-4">
+            <Link
+              href={`/invest/deposit?fund=${selectedFund}`}
+              className="px-6 py-3 bg-green-500 hover:bg-green-600 text-white font-medium rounded-lg transition-colors"
+            >
+              Deposit into {currentFund.name}
+            </Link>
+            <Link
+              href="/funds"
+              className="px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white font-medium rounded-lg transition-colors"
+            >
+              Compare Funds
+            </Link>
           </div>
         </>
       )}

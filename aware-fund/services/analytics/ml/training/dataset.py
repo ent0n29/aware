@@ -5,14 +5,18 @@ Handles:
 - Loading features from ClickHouse
 - Creating train/val/test splits (time-based)
 - DataLoader creation with proper batching
+- Batch sequence extraction for efficiency
 """
 
 import logging
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
+from pathlib import Path
 import numpy as np
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+from .label_generator import LabelGenerator, TraderLabel
 
 logger = logging.getLogger(__name__)
 
@@ -334,3 +338,248 @@ def _create_loaders_from_arrays(data, config) -> Tuple[DataLoader, DataLoader, D
         DataLoader(val_ds, batch_size=config.batch_size, shuffle=False),
         DataLoader(test_ds, batch_size=config.batch_size, shuffle=False),
     )
+
+
+def extract_sequences_batch(
+    ch_client,
+    proxy_addresses: List[str],
+    sequence_length: int = 100,
+    batch_size: int = 1000
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Batch extract trade sequences for multiple traders in a single query.
+
+    This is MUCH faster than querying each trader individually.
+    Uses ClickHouse's groupArray to aggregate trades per trader.
+
+    Args:
+        ch_client: ClickHouse client
+        proxy_addresses: List of wallet addresses
+        sequence_length: Max sequence length to extract
+        batch_size: Addresses to process per query (for memory)
+
+    Returns:
+        sequences: (N, seq_length, 5) array
+        lengths: (N,) array of actual sequence lengths
+    """
+    logger.info(f"Batch extracting sequences for {len(proxy_addresses)} traders...")
+
+    n = len(proxy_addresses)
+    sequences = np.zeros((n, sequence_length, 5), dtype=np.float32)
+    lengths = np.zeros(n, dtype=np.int32)
+
+    # Create address to index mapping
+    addr_to_idx = {addr: i for i, addr in enumerate(proxy_addresses)}
+
+    # Process in batches to avoid memory issues
+    for batch_start in range(0, n, batch_size):
+        batch_end = min(batch_start + batch_size, n)
+        batch_addrs = proxy_addresses[batch_start:batch_end]
+
+        if not batch_addrs:
+            continue
+
+        # Format for SQL IN clause
+        addr_list = "', '".join(batch_addrs)
+
+        # Query: Get last N trades per trader using groupArray
+        # Features: normalized_price, log_size, side_numeric, hour_sin, hour_cos
+        query = f"""
+            SELECT
+                proxy_address,
+                groupArray({sequence_length})(
+                    tuple(
+                        price,
+                        log10(size + 1),
+                        if(side = 'BUY', 1.0, -1.0),
+                        sin(toHour(ts) * 3.14159 / 12),
+                        cos(toHour(ts) * 3.14159 / 12)
+                    )
+                ) as trades
+            FROM (
+                SELECT proxy_address, ts, price, size, side
+                FROM polybot.aware_global_trades_dedup
+                WHERE proxy_address IN ('{addr_list}')
+                ORDER BY proxy_address, ts DESC
+            )
+            GROUP BY proxy_address
+        """
+
+        try:
+            result = ch_client.query(query)
+
+            for row in result.result_rows:
+                addr = row[0]
+                trades = row[1]
+
+                if addr not in addr_to_idx:
+                    continue
+
+                idx = addr_to_idx[addr]
+                seq_len = min(len(trades), sequence_length)
+
+                if seq_len > 0:
+                    # Convert tuple list to array (reverse for chronological order)
+                    trade_array = np.array(list(reversed(trades[:seq_len])), dtype=np.float32)
+
+                    # Normalize price to 0-1 range
+                    if trade_array[:, 0].max() > 1:
+                        trade_array[:, 0] = trade_array[:, 0] / trade_array[:, 0].max()
+
+                    sequences[idx, :seq_len] = trade_array
+                    lengths[idx] = seq_len
+
+        except Exception as e:
+            logger.warning(f"Failed to extract batch {batch_start}-{batch_end}: {e}")
+            continue
+
+        if batch_start % 5000 == 0:
+            logger.info(f"Processed {batch_start}/{n} traders")
+
+    non_empty = (lengths > 0).sum()
+    logger.info(f"Extracted sequences: {non_empty}/{n} traders have data")
+
+    return sequences, lengths
+
+
+def create_dataloaders_v2(
+    ch_client,
+    feature_extractor,
+    config,
+    use_cache: bool = True,
+    cache_path: Optional[str] = None
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create train/val/test DataLoaders with optimized batch extraction.
+
+    Improvements over v1:
+    - Uses LabelGenerator for proper label extraction
+    - Uses batch sequence extraction (single query vs N queries)
+    - Better Sharpe ratio handling
+
+    Args:
+        ch_client: ClickHouse client
+        feature_extractor: FeatureExtractor instance
+        config: TrainingConfig
+        use_cache: Use cached features if available
+        cache_path: Path to cache file
+
+    Returns:
+        (train_loader, val_loader, test_loader)
+    """
+    cache_path = cache_path or str(Path(config.checkpoint_dir) / "data_cache.npz")
+
+    # Try loading from cache
+    if use_cache:
+        try:
+            data = np.load(cache_path, allow_pickle=True)
+            logger.info(f"Loaded cached data from {cache_path}")
+            return _create_loaders_from_arrays(data, config)
+        except Exception as e:
+            logger.info(f"Cache not found or invalid: {e}")
+
+    logger.info("Building training dataset from ClickHouse...")
+
+    # Step 1: Generate labels from existing scores
+    label_gen = LabelGenerator(ch_client)
+    labels = label_gen.generate_labels_with_derived_sharpe(
+        min_trades=config.min_trades,
+        max_traders=config.max_traders
+    )
+
+    if len(labels) < 100:
+        raise ValueError(f"Not enough labeled traders: {len(labels)}")
+
+    # Get ordered list of addresses (sorted by first_trade_at for time-based split)
+    addresses = sorted(
+        labels.keys(),
+        key=lambda a: labels[a].first_trade_at
+    )
+
+    logger.info(f"Processing {len(addresses)} traders")
+
+    # Step 2: Extract tabular features (batch)
+    logger.info("Extracting tabular features...")
+    features_list = feature_extractor.extract_batch(addresses)
+
+    # Build tabular array
+    n = len(addresses)
+    n_tabular = len(features_list[0].to_tabular_vector()) if features_list else 35
+    tabular = np.zeros((n, n_tabular), dtype=np.float32)
+
+    for i, feat in enumerate(features_list):
+        if feat is not None:
+            tabular[i] = feat.to_tabular_vector()
+
+    # Step 3: Extract sequences (batch - single query!)
+    logger.info("Extracting sequences (batch mode)...")
+    sequences, lengths = extract_sequences_batch(
+        ch_client, addresses, config.sequence_length
+    )
+
+    # Step 4: Get label arrays
+    tiers, sharpes, scores = label_gen.get_label_arrays(labels, addresses)
+
+    # Step 5: Time-based split (data is already sorted by first_trade_at)
+    n_train = int(n * config.train_ratio)
+    n_val = int(n * config.val_ratio)
+
+    train_idx = np.arange(0, n_train)
+    val_idx = np.arange(n_train, n_train + n_val)
+    test_idx = np.arange(n_train + n_val, n)
+
+    logger.info(f"Split: train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}")
+
+    # Step 6: Save to cache
+    Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        cache_path,
+        sequences=sequences,
+        lengths=lengths,
+        tabular=tabular,
+        tiers=tiers,
+        sharpes=sharpes,
+        scores=scores,
+        train_idx=train_idx,
+        val_idx=val_idx,
+        test_idx=test_idx,
+        addresses=np.array(addresses)
+    )
+    logger.info(f"Saved cache to {cache_path}")
+
+    # Step 7: Create datasets
+    train_ds = AWAREDataset(
+        sequences[train_idx], lengths[train_idx], tabular[train_idx],
+        tiers[train_idx], sharpes[train_idx], scores[train_idx],
+        augment=True
+    )
+    val_ds = AWAREDataset(
+        sequences[val_idx], lengths[val_idx], tabular[val_idx],
+        tiers[val_idx], sharpes[val_idx], scores[val_idx],
+        augment=False
+    )
+    test_ds = AWAREDataset(
+        sequences[test_idx], lengths[test_idx], tabular[test_idx],
+        tiers[test_idx], sharpes[test_idx], scores[test_idx],
+        augment=False
+    )
+
+    # Step 8: Create loaders
+    train_loader = DataLoader(
+        train_ds, batch_size=config.batch_size, shuffle=True,
+        num_workers=0, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=config.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=config.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True
+    )
+
+    logger.info(
+        f"Created loaders: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}"
+    )
+
+    return train_loader, val_loader, test_loader

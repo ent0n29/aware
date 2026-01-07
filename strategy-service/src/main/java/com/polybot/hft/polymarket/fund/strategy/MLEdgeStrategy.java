@@ -35,8 +35,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 5. ActiveFundExecutor handles execution
  *
  * Filtering:
- * - Edge score threshold (default 70+)
- * - Anomaly score filter (< 0.5 to exclude bots/manipulators)
+ * - Edge score threshold (70+ out of 100 = GOLD tier or better)
+ * - Tier confidence filter (> 0.5 for confident ML predictions)
  * - Signal freshness (trades within last hour)
  * - Deduplication (track processed trades)
  * - Market validity (check market is still active)
@@ -57,10 +57,10 @@ public class MLEdgeStrategy extends ActiveFundExecutor {
     private static final int MARKET_COOLDOWN_SECONDS = 120;  // 2 minutes between signals on same market
     private static final int EDGE_CACHE_TTL_SECONDS = 300;   // 5 minutes cache for edge scores
 
-    // Edge thresholds
-    private static final double MIN_EDGE_SCORE = 70.0;
-    private static final double MAX_ANOMALY_SCORE = 0.5;
-    private static final double EDGE_DECAY_THRESHOLD = 15.0;  // Points drop triggers sell
+    // Edge thresholds - ML ensemble produces scores in 0-100 range
+    private static final double MIN_EDGE_SCORE = 70.0;  // GOLD tier threshold (top ~20% traders)
+    private static final double MAX_ANOMALY_SCORE = 0.5;  // tier_confidence > 0.5 (more confident predictions)
+    private static final double EDGE_DECAY_THRESHOLD = 15.0;  // Points drop triggers sell (scaled for 0-100)
 
     // Cache of high-edge traders: proxy_address -> EdgeTrader
     private final Map<String, EdgeTrader> highEdgeTraders = new ConcurrentHashMap<>();
@@ -134,20 +134,23 @@ public class MLEdgeStrategy extends ActiveFundExecutor {
 
     /**
      * Refresh cache of high-edge traders from ML scores table.
+     *
+     * Note: The actual schema uses ml_score instead of edge_score,
+     * and tier_confidence (higher = better) instead of anomaly_score.
      */
     private void refreshHighEdgeTraders() {
         String sql = """
             SELECT
                 username,
                 proxy_address,
-                edge_score,
-                anomaly_score,
-                strategy_cluster,
-                updated_at
+                ml_score as edge_score,
+                1.0 - tier_confidence as anomaly_score,
+                ml_tier as strategy_cluster,
+                calculated_at as updated_at
             FROM polybot.aware_ml_scores FINAL
-            WHERE edge_score > ?
-              AND anomaly_score < ?
-            ORDER BY edge_score DESC
+            WHERE ml_score > ?
+              AND tier_confidence > ?
+            ORDER BY ml_score DESC
             LIMIT 50
             """;
 
@@ -155,7 +158,8 @@ public class MLEdgeStrategy extends ActiveFundExecutor {
             List<EdgeTrader> traders = jdbcTemplate.query(sql,
                     ps -> {
                         ps.setDouble(1, MIN_EDGE_SCORE);
-                        ps.setDouble(2, MAX_ANOMALY_SCORE);
+                        // tier_confidence > 0.5 means confident prediction (inverse of anomaly_score < 0.5)
+                        ps.setDouble(2, 1.0 - MAX_ANOMALY_SCORE);
                     },
                     (rs, rowNum) -> new EdgeTrader(
                             rs.getString("username"),

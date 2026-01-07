@@ -18,9 +18,11 @@ import {
   GitBranch,
   Fish,  // Using Fish instead of Whale (not available in lucide-react)
   ExternalLink,
+  Activity,
 } from 'lucide-react'
 import { cn, formatNumber, formatCurrency } from '@/lib/utils'
-import { api, InsiderAlert, InsiderAlertsResponse } from '@/lib/api'
+import { api, InsiderAlert, InsiderAlertsResponse, EdgeDecayAlert, EdgeDecayResponse } from '@/lib/api'
+import { EdgeDecayCard } from '@/components/alerts/EdgeDecayCard'
 
 const signalTypes = {
   NEW_ACCOUNT_WHALE: {
@@ -85,13 +87,17 @@ const severityConfig = {
 }
 
 export default function InsiderAlertsPage() {
+  const [activeTab, setActiveTab] = useState<'insider' | 'edge-decay'>('insider')
   const [alerts, setAlerts] = useState<InsiderAlert[]>([])
+  const [edgeAlerts, setEdgeAlerts] = useState<EdgeDecayAlert[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingEdge, setIsLoadingEdge] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedType, setSelectedType] = useState<string | null>(null)
   const [selectedSeverity, setSelectedSeverity] = useState<string | null>(null)
   const [lookbackHours, setLookbackHours] = useState(48)
 
+  // Fetch insider alerts
   useEffect(() => {
     async function fetchAlerts() {
       try {
@@ -110,6 +116,25 @@ export default function InsiderAlertsPage() {
     fetchAlerts()
   }, [lookbackHours])
 
+  // Fetch edge decay alerts when tab is active
+  useEffect(() => {
+    if (activeTab !== 'edge-decay') return
+
+    async function fetchEdgeAlerts() {
+      try {
+        setIsLoadingEdge(true)
+        const response = await api.getEdgeAlerts()
+        setEdgeAlerts(response.alerts)
+      } catch (err) {
+        console.error('Edge decay fetch error:', err)
+        setEdgeAlerts([])
+      } finally {
+        setIsLoadingEdge(false)
+      }
+    }
+    fetchEdgeAlerts()
+  }, [activeTab])
+
   const filteredAlerts = alerts.filter((alert) => {
     if (selectedType && alert.signal_type !== selectedType) return false
     if (selectedSeverity && alert.severity !== selectedSeverity) return false
@@ -124,43 +149,85 @@ export default function InsiderAlertsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white flex items-center gap-3">
-          <AlertTriangle className="h-7 w-7 text-red-400" />
-          Insider Alerts
-        </h1>
-        <p className="text-slate-400 mt-1">
-          Detecting unusual trading activity that may indicate insider knowledge
-        </p>
-      </div>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-3">
+            <AlertTriangle className="h-7 w-7 text-red-400" />
+            Alerts
+          </h1>
+          <p className="text-slate-400 mt-1">
+            Detecting unusual activity and tracking trader performance
+          </p>
+        </div>
 
-      {/* Explainer */}
-      <div className="rounded-xl bg-gradient-to-r from-red-500/10 via-orange-500/10 to-yellow-500/10 border border-red-500/20 p-6">
-        <div className="flex items-start gap-4">
-          <div className="p-3 rounded-xl bg-red-500/20">
-            <Eye className="h-6 w-6 text-red-400" />
-          </div>
-          <div>
-            <h3 className="font-semibold text-white text-lg mb-2">Insider Activity Detection</h3>
-            <p className="text-sm text-slate-400 mb-4">
-              Our algorithms scan for suspicious trading patterns that may indicate someone has
-              advance knowledge of market outcomes. Prediction markets have no insider trading laws,
-              but detecting this activity creates massive alpha opportunities.
-            </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {Object.entries(signalTypes).map(([key, type]) => (
-                <div key={key} className={cn('p-3 rounded-lg', type.bg, type.border, 'border')}>
-                  <type.icon className={cn('h-5 w-5 mb-2', type.color)} />
-                  <p className="text-sm font-medium text-white">{type.label}</p>
-                  <p className="text-xs text-slate-500 mt-1">{type.description}</p>
-                </div>
-              ))}
-            </div>
-          </div>
+        {/* Tab Switcher */}
+        <div className="flex items-center gap-1 bg-slate-800/50 p-1 rounded-lg">
+          <button
+            onClick={() => setActiveTab('insider')}
+            className={cn(
+              'px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-2',
+              activeTab === 'insider'
+                ? 'bg-red-500 text-white'
+                : 'text-slate-400 hover:text-white hover:bg-slate-700'
+            )}
+          >
+            <Eye className="w-4 h-4" />
+            Insider Alerts
+            {alerts.length > 0 && (
+              <span className="px-1.5 py-0.5 text-xs bg-red-600 rounded-full">{alerts.length}</span>
+            )}
+          </button>
+          <button
+            onClick={() => setActiveTab('edge-decay')}
+            className={cn(
+              'px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-2',
+              activeTab === 'edge-decay'
+                ? 'bg-yellow-500 text-slate-900'
+                : 'text-slate-400 hover:text-white hover:bg-slate-700'
+            )}
+          >
+            <Activity className="w-4 h-4" />
+            Edge Decay
+            {edgeAlerts.length > 0 && (
+              <span className={cn(
+                'px-1.5 py-0.5 text-xs rounded-full',
+                activeTab === 'edge-decay' ? 'bg-yellow-600 text-white' : 'bg-yellow-500/20 text-yellow-400'
+              )}>{edgeAlerts.length}</span>
+            )}
+          </button>
         </div>
       </div>
 
-      {/* Summary Stats */}
+      {/* Insider Tab Content */}
+      {activeTab === 'insider' && (
+        <>
+          {/* Explainer */}
+          <div className="rounded-xl bg-gradient-to-r from-red-500/10 via-orange-500/10 to-yellow-500/10 border border-red-500/20 p-6">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-xl bg-red-500/20">
+                <Eye className="h-6 w-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-white text-lg mb-2">Insider Activity Detection</h3>
+                <p className="text-sm text-slate-400 mb-4">
+                  Our algorithms scan for suspicious trading patterns that may indicate someone has
+                  advance knowledge of market outcomes. Prediction markets have no insider trading laws,
+                  but detecting this activity creates massive alpha opportunities.
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {Object.entries(signalTypes).map(([key, type]) => (
+                    <div key={key} className={cn('p-3 rounded-lg', type.bg, type.border, 'border')}>
+                      <type.icon className={cn('h-5 w-5 mb-2', type.color)} />
+                      <p className="text-sm font-medium text-white">{type.label}</p>
+                      <p className="text-xs text-slate-500 mt-1">{type.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Summary Stats */}
       {!isLoading && alerts.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-4">
@@ -425,6 +492,82 @@ export default function InsiderAlertsPage() {
             )
           })}
         </div>
+      )}
+        </>
+      )}
+
+      {/* Edge Decay Tab Content */}
+      {activeTab === 'edge-decay' && (
+        <>
+          {/* Edge Decay Explainer */}
+          <div className="rounded-xl bg-gradient-to-r from-yellow-500/10 via-orange-500/10 to-red-500/10 border border-yellow-500/20 p-6">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-xl bg-yellow-500/20">
+                <Activity className="h-6 w-6 text-yellow-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-white text-lg mb-2">Edge Decay Detection</h3>
+                <p className="text-sm text-slate-400">
+                  Monitor traders whose performance is declining. Identify when to reduce exposure
+                  to traders who may be losing their edge, and proactively manage index composition.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Edge Decay Loading */}
+          {isLoadingEdge && (
+            <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-12 flex items-center justify-center">
+              <Loader2 className="h-8 w-8 text-yellow-400 animate-spin" />
+              <span className="ml-3 text-slate-400">Analyzing trader performance...</span>
+            </div>
+          )}
+
+          {/* Edge Decay Empty State */}
+          {!isLoadingEdge && edgeAlerts.length === 0 && (
+            <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-12 text-center">
+              <Activity className="h-12 w-12 text-slate-600 mx-auto mb-4" />
+              <p className="text-slate-400">No edge decay detected</p>
+              <p className="text-sm text-slate-500 mt-1">
+                All tracked traders are performing within expectations
+              </p>
+            </div>
+          )}
+
+          {/* Edge Decay Alerts */}
+          {!isLoadingEdge && edgeAlerts.length > 0 && (
+            <div className="space-y-4">
+              {/* Summary */}
+              <div className="grid grid-cols-3 gap-4">
+                <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4">
+                  <p className="text-sm text-slate-400 mb-1">Remove from Index</p>
+                  <p className="text-2xl font-bold text-red-400">
+                    {edgeAlerts.filter(a => a.recommended_action === 'REMOVE_FROM_INDEX').length}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-yellow-500/10 border border-yellow-500/30 p-4">
+                  <p className="text-sm text-slate-400 mb-1">Reduce Weight</p>
+                  <p className="text-2xl font-bold text-yellow-400">
+                    {edgeAlerts.filter(a => a.recommended_action === 'REDUCE_WEIGHT').length}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-blue-500/10 border border-blue-500/30 p-4">
+                  <p className="text-sm text-slate-400 mb-1">Monitor</p>
+                  <p className="text-2xl font-bold text-blue-400">
+                    {edgeAlerts.filter(a => a.recommended_action === 'MONITOR').length}
+                  </p>
+                </div>
+              </div>
+
+              {/* Edge Decay Cards */}
+              <div className="space-y-4">
+                {edgeAlerts.map((alert, idx) => (
+                  <EdgeDecayCard key={`${alert.username}-${idx}`} alert={alert} />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* CTA */}

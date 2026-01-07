@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from clickhouse_client import ClickHouseClient
 from ml.features import FeatureExtractor
-from ml.training import TrainingConfig, AWARETrainer, create_dataloaders
+from ml.training import TrainingConfig, AWARETrainer, create_dataloaders_v2
 
 # Configure logging
 logging.basicConfig(
@@ -164,9 +164,9 @@ def main():
     # Initialize feature extractor
     feature_extractor = FeatureExtractor(ch_client, sequence_length=config.sequence_length)
 
-    # Create data loaders
+    # Create data loaders (using v2 with batch sequence extraction)
     cache_path = None if args.no_cache else args.cache_path
-    train_loader, val_loader, test_loader = create_dataloaders(
+    train_loader, val_loader, test_loader = create_dataloaders_v2(
         ch_client,
         feature_extractor,
         config,

@@ -169,10 +169,37 @@ def run_index_building():
 
 
 def run_insider_detection():
-    """Run insider detection scan."""
+    """Run insider detection scan and dispatch alerts."""
+    from clickhouse_driver import Client
     from insider_detector import InsiderDetector
-    detector = InsiderDetector()
-    detector.scan_all()
+    from notifications.dispatcher import AlertDispatcher
+    import asyncio
+
+    # Create ClickHouse client
+    ch_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
+    ch_port = int(os.getenv('CLICKHOUSE_PORT', '9000'))
+    client = Client(host=ch_host, port=ch_port)
+
+    # Run detection
+    detector = InsiderDetector(client)
+    alerts = detector.scan_for_insider_activity()
+
+    if not alerts:
+        logger.info("No insider alerts detected")
+        return
+
+    logger.info(f"Detected {len(alerts)} insider alerts, dispatching...")
+
+    # Dispatch alerts to configured channels (Discord, etc.)
+    dispatcher = AlertDispatcher(clickhouse_client=client)
+
+    async def dispatch_all():
+        for alert in alerts:
+            await dispatcher.dispatch(alert)
+
+    # Run async dispatch in sync context
+    asyncio.run(dispatch_all())
+    logger.info(f"Dispatched {len(alerts)} alerts")
 
 
 def run_ml_enrichment():

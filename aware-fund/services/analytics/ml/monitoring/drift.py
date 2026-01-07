@@ -240,6 +240,69 @@ class DriftDetector:
             drift_severity=severity
         )
 
+    def save_baseline(self, path: str) -> None:
+        """
+        Persist baseline statistics to file.
+
+        Args:
+            path: Path to save baseline (pickle format)
+        """
+        import pickle
+        from pathlib import Path
+
+        data = {
+            'baseline_stats': self.baseline_stats,
+            'baseline_distributions': {
+                k: v.tolist() for k, v in self.baseline_distributions.items()
+            },
+            'significance_level': self.significance_level,
+            'min_samples': self.min_samples,
+            'warning_threshold': self.warning_threshold,
+            'critical_threshold': self.critical_threshold,
+            'saved_at': datetime.utcnow().isoformat(),
+        }
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+
+        logger.info(f"Saved drift baseline to {path} ({len(self.baseline_stats)} features)")
+
+    @classmethod
+    def load_baseline(cls, path: str) -> 'DriftDetector':
+        """
+        Load baseline from file.
+
+        Args:
+            path: Path to saved baseline
+
+        Returns:
+            DriftDetector with loaded baseline
+        """
+        import pickle
+        from pathlib import Path
+
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Drift baseline not found at {path}")
+
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+
+        detector = cls(
+            significance_level=data.get('significance_level', 0.01),
+            min_samples=data.get('min_samples', 100),
+            warning_threshold=data.get('warning_threshold', 0.1),
+            critical_threshold=data.get('critical_threshold', 0.3),
+        )
+
+        detector.baseline_stats = data['baseline_stats']
+        detector.baseline_distributions = {
+            k: np.array(v) for k, v in data['baseline_distributions'].items()
+        }
+
+        logger.info(f"Loaded drift baseline from {path} ({len(detector.baseline_stats)} features)")
+        return detector
+
     def log_report(self, report: DriftReport) -> None:
         """Log drift report summary."""
         logger.info("=" * 50)

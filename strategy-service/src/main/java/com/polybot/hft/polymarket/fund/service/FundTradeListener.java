@@ -123,7 +123,10 @@ public class FundTradeListener {
             log.warn("No constituents found for index: {}. Check aware_psi_index table.", config.indexType());
             return List.of();
         }
-        log.debug("Fetching trades for {} constituents in index {}", constituents.size(), config.indexType());
+        // Log every 60 polls (~1 minute) to avoid spam
+        if (tradesProcessed == 0 && System.currentTimeMillis() % 60000 < 1000) {
+            log.info("Polling {} constituents for trades in index {}", constituents.size(), config.indexType());
+        }
 
         // Build proxy address list
         List<String> addresses = constituents.stream()
@@ -133,8 +136,9 @@ public class FundTradeListener {
         // Initialize polling window
         Instant now = clock.instant();
         if (lastPollTime == null) {
-            // Start from 10 seconds ago on first poll
-            lastPollTime = now.minusSeconds(10);
+            // Start from 1 hour ago on first poll to catch recent trader activity
+            lastPollTime = now.minusSeconds(3600);
+            log.info("Initializing poll window: looking back 1 hour to {}", lastPollTime);
         }
 
         // Query for new trades
@@ -219,10 +223,14 @@ public class FundTradeListener {
               AND ts > toDateTime('%s')
               AND ts <= toDateTime('%s')
             ORDER BY ts
-            LIMIT 100
+            LIMIT 500
             """.formatted(addressList, fromStr, toStr);
 
-        log.debug("Querying trades: {} addresses, from={}, to={}", addresses.size(), from, to);
+        // Log first query for debugging
+        if (tradesProcessed == 0) {
+            log.info("Query: {} addresses, window=[{} to {}], first addr={}",
+                addresses.size(), fromStr, toStr, addresses.isEmpty() ? "none" : addresses.get(0));
+        }
         try {
             List<RawTrade> result = jdbcTemplate.query(sql, (rs, rowNum) -> new RawTrade(
                     rs.getTimestamp("ts").toInstant(),
@@ -252,9 +260,14 @@ public class FundTradeListener {
                 ? TraderSignal.SignalType.BUY
                 : TraderSignal.SignalType.SELL;
 
+        // Use constituent.username() since trade.username may be empty in ClickHouse
+        String traderName = (trade.username != null && !trade.username.isBlank())
+                ? trade.username
+                : constituent.username();
+
         return new TraderSignal(
                 UUID.randomUUID().toString(),
-                trade.username,
+                traderName,
                 trade.marketSlug,
                 trade.tokenId,
                 trade.outcome,

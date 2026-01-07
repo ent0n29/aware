@@ -1,0 +1,284 @@
+name: aware-production
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.11
+    container_name: aware-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "2"
+      - --memory
+      - "2G"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - INTERNAL://redpanda:29092,EXTERNAL://redpanda:9092
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: aware-clickhouse
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ../analytics-service/clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ../analytics-service/clickhouse/users.d/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml:ro
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_DB: polybot
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JAVA SERVICES (Polybot Trading Infrastructure)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  executor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: executor-service
+    container_name: aware-executor
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      POLYMARKET_API_KEY: ${POLYMARKET_API_KEY}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE}
+      POLYMARKET_PRIVATE_KEY: ${POLYMARKET_PRIVATE_KEY}
+      HFT_MODE: ${HFT_MODE:-PAPER}
+      JAVA_OPTS: "-Xmx1g -Xms512m"
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/polymarket/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  strategy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: strategy-service
+    container_name: aware-strategy
+    depends_on:
+      executor:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      EXECUTOR_BASE_URL: http://executor:8080
+      HFT_MODE: ${HFT_MODE:-PAPER}
+      JAVA_OPTS: "-Xmx2g -Xms1g"
+    ports:
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/strategy/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  ingestor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: ingestor-service
+    container_name: aware-ingestor
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      JAVA_OPTS: "-Xmx1g -Xms512m"
+    ports:
+      - "127.0.0.1:8083:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PYTHON SERVICES (AWARE Fund Analytics)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  analytics:
+    build:
+      context: ../aware-fund/services/analytics
+      dockerfile: Dockerfile
+    container_name: aware-analytics
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: polybot
+      SCORING_INTERVAL_SECONDS: 3600
+      LOG_LEVEL: INFO
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../aware-fund/services/api
+      dockerfile: Dockerfile
+    container_name: aware-api
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: polybot
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      LOG_LEVEL: INFO
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WEB DASHBOARD
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    container_name: aware-web
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://api:8000}
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # REVERSE PROXY (Nginx)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  nginx:
+    image: nginx:alpine
+    container_name: aware-nginx
+    depends_on:
+      - web
+      - api
+      - strategy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot_data:/var/www/certbot:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MONITORING
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: aware-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: aware-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    restart: unless-stopped
+
+volumes:
+  redpanda_data:
+  clickhouse_data:
+  prometheus_data:
+  grafana_data:
+  certbot_data:
+  letsencrypt:
+
+networks:
+  default:
+    name: aware-network

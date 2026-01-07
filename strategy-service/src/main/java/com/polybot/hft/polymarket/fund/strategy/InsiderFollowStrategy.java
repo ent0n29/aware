@@ -1,5 +1,7 @@
 package com.polybot.hft.polymarket.fund.strategy;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.polybot.hft.polymarket.fund.config.ActiveFundConfig;
 import com.polybot.hft.polymarket.fund.model.AlphaSignal;
 import com.polybot.hft.strategy.executor.ExecutorApiClient;
@@ -53,6 +55,9 @@ public class InsiderFollowStrategy extends ActiveFundExecutor {
     private static final int DEFAULT_POLL_INTERVAL_SECONDS = 5;
     private static final int MAX_ALERT_AGE_SECONDS = 300;  // 5 minutes
     private static final int MARKET_COOLDOWN_SECONDS = 60;  // 1 minute between signals on same market
+
+    // JSON parser for alert metadata
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Track processed alerts to avoid duplicates
     private final Set<String> processedAlertIds = ConcurrentHashMap.newKeySet();
@@ -345,24 +350,21 @@ public class InsiderFollowStrategy extends ActiveFundExecutor {
 
     /**
      * Parse metadata JSON string into a map.
+     *
+     * Uses Jackson ObjectMapper for proper JSON parsing.
      */
-    @SuppressWarnings("unchecked")
     private Map<String, Object> parseMetadata(String metadataJson) {
-        if (metadataJson == null || metadataJson.isBlank()) {
+        if (metadataJson == null || metadataJson.isBlank() || metadataJson.equals("{}")) {
             return Map.of();
         }
 
         try {
-            // Simple JSON parsing - in production, use ObjectMapper
-            if (metadataJson.equals("{}")) {
-                return Map.of();
-            }
-
-            // For now, return empty and parse properly with Jackson if needed
-            // This would be: objectMapper.readValue(metadataJson, Map.class)
-            return Map.of();
+            return objectMapper.readValue(
+                    metadataJson,
+                    new TypeReference<Map<String, Object>>() {}
+            );
         } catch (Exception e) {
-            log.debug("Failed to parse metadata: {}", e.getMessage());
+            log.warn("Failed to parse alert metadata: {} - {}", e.getClass().getSimpleName(), e.getMessage());
             return Map.of();
         }
     }

@@ -278,7 +278,8 @@ public class GabagoolMarketDiscovery {
         Duration duration = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(15) : Duration.ofHours(1);
         Instant startTime = market.endTime().minus(duration);
         // Pre-warm well before the market "start" to catch early activity (widened to match gab's timing).
-        Duration prewarm = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(5) : Duration.ofMinutes(10);
+        // Analysis shows gab enters 1h markets up to 41 minutes before end, so we need 30+ min prewarm.
+        Duration prewarm = "updown-15m".equals(market.marketType()) ? Duration.ofMinutes(5) : Duration.ofMinutes(30);
         return !now.isBefore(startTime.minus(prewarm));
     }
 

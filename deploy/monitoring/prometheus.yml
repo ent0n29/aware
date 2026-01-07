@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Java services (Spring Boot Actuator)
+  - job_name: 'executor'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['executor:8080']
+
+  - job_name: 'strategy'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['strategy:8080']
+
+  - job_name: 'ingestor'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['ingestor:8080']
+
+  # ClickHouse
+  - job_name: 'clickhouse'
+    static_configs:
+      - targets: ['clickhouse:9363']
+
+  # Redpanda
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['redpanda:9644']

@@ -165,6 +165,7 @@ INDEX_CONFIGS = {
         excluded_strategies=NON_REPLICABLE_STRATEGIES,
     ),
     # PSI-CRYPTO: Crypto market specialists (DIRECTIONAL only, no arb)
+    # NOTE: Relaxed for bootstrap - allow all non-arb strategies
     IndexType.PSI_CRYPTO: IndexConfig(
         index_type=IndexType.PSI_CRYPTO,
         num_constituents=15,
@@ -175,8 +176,8 @@ INDEX_CONFIGS = {
         min_days_active=1,       # Relaxed from 14 (bootstrap)
         min_volume_usd=500.0,    # Relaxed from 10000 (bootstrap)
         min_sharpe=0.0,
-        # Only include directional traders in crypto markets
-        allowed_strategies=["DIRECTIONAL_MOMENTUM", "DIRECTIONAL_FUNDAMENTAL", "HYBRID"],
+        # Exclude arb/HFT but allow all other strategies including empty
+        excluded_strategies=NON_REPLICABLE_STRATEGIES,
     ),
     # PSI-POLITICS: Political market specialists (directional/event-driven)
     IndexType.PSI_POLITICS: IndexConfig(
@@ -210,21 +211,22 @@ INDEX_CONFIGS = {
     # ═══════════════════════════════════════════════════════════════════════════
 
     # PSI-SPORTS: Sports betting specialists
+    # NOTE: Relaxed for bootstrap - remove category filter until more data
     IndexType.PSI_SPORTS: IndexConfig(
         index_type=IndexType.PSI_SPORTS,
         num_constituents=10,
         weighting_method=WeightingMethod.SCORE_WEIGHTED,
         rebalance_frequency=RebalanceFrequency.WEEKLY,
         min_total_score=40.0,
-        min_trades=10,
-        min_days_active=7,
-        min_volume_usd=1000.0,
+        min_trades=5,            # Relaxed from 10 (bootstrap)
+        min_days_active=1,       # Relaxed from 7 (bootstrap)
+        min_volume_usd=500.0,    # Relaxed from 1000 (bootstrap)
         min_sharpe=0.0,
         # Only directional traders (no arb on sports)
         excluded_strategies=NON_REPLICABLE_STRATEGIES,
-        # Must specialize in sports markets
-        required_categories=["SPORTS"],
-        min_category_concentration=0.5,  # 50% of volume in sports
+        # DISABLED for bootstrap - enable when category profiler has data
+        # required_categories=["SPORTS"],
+        # min_category_concentration=0.5,
     ),
 
     # PSI-NEWS: Breaking news specialists
@@ -251,15 +253,16 @@ INDEX_CONFIGS = {
 
     # PSI-ALPHA: ML-selected traders with cluster-balanced diversification
     # Uses Strategy DNA clustering to ensure diverse strategy mix
+    # NOTE: Relaxed for bootstrap - use score weighting until ML clusters ready
     IndexType.PSI_ALPHA: IndexConfig(
         index_type=IndexType.PSI_ALPHA,
         num_constituents=15,
-        weighting_method=WeightingMethod.ML_CLUSTER_BALANCED,
+        weighting_method=WeightingMethod.SCORE_WEIGHTED,  # Fallback from ML_CLUSTER_BALANCED
         rebalance_frequency=RebalanceFrequency.WEEKLY,
         min_total_score=50.0,
-        min_trades=10,
-        min_days_active=7,
-        min_volume_usd=1000.0,
+        min_trades=5,            # Relaxed from 10 (bootstrap)
+        min_days_active=1,       # Relaxed from 7 (bootstrap)
+        min_volume_usd=500.0,    # Relaxed from 1000 (bootstrap)
         min_sharpe=0.0,
         # Exclude HFT/arb (non-replicable)
         excluded_strategies=NON_REPLICABLE_STRATEGIES,
@@ -413,12 +416,16 @@ class PSIIndexBuilder:
                 }
 
                 # Apply strategy filters
+                strategy = trader['strategy_type']
+
                 if config.allowed_strategies:
-                    if trader['strategy_type'] not in config.allowed_strategies:
+                    # Empty/unknown strategies pass through allowed filter
+                    if strategy and strategy not in ['', 'UNKNOWN'] and strategy not in config.allowed_strategies:
                         continue
 
                 if config.excluded_strategies:
-                    if trader['strategy_type'] in config.excluded_strategies:
+                    # Only exclude if strategy is explicitly in exclusion list
+                    if strategy and strategy in config.excluded_strategies:
                         continue
 
                 traders.append(trader)
@@ -706,12 +713,13 @@ class PSIIndexBuilder:
     def save_index(self, index: PSIIndex) -> bool:
         """Save index to ClickHouse"""
         try:
-            # Delete old entries for this index type first
+            # Delete old entries for this index type first (synchronous mutation)
             # This ensures removed traders don't remain in the table
+            # mutations_sync=1 makes the DELETE wait until complete
             self.ch.command(
-                f"ALTER TABLE aware_psi_index DELETE WHERE index_type = '{index.index_type.value}'"
+                f"ALTER TABLE polybot.aware_psi_index DELETE WHERE index_type = '{index.index_type.value}' SETTINGS mutations_sync = 1"
             )
-            logger.info(f"Cleared old {index.index_type.value} entries")
+            logger.info(f"Cleared old {index.index_type.value} entries (sync)")
 
             # Prepare data for insertion
             rows = []
@@ -729,7 +737,7 @@ class PSIIndexBuilder:
                 ))
 
             self.ch.insert(
-                'aware_psi_index',
+                'polybot.aware_psi_index',
                 rows,
                 column_names=[
                     'index_type', 'username', 'proxy_address', 'weight',

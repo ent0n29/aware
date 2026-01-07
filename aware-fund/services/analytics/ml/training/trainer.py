@@ -136,6 +136,9 @@ class AWARETrainer:
         y_tier_val = np.concatenate(y_tier_val)
         y_sharpe_val = np.concatenate(y_sharpe_val)
 
+        # Store training features for drift baseline
+        self._train_features = X_train
+
         # Train XGBoost
         self.tabular_scorer = TabularScorer(
             use_lightgbm=self.config.use_lightgbm,
@@ -422,7 +425,7 @@ class AWARETrainer:
         }
 
     def _save_checkpoint(self) -> None:
-        """Save trained ensemble."""
+        """Save trained ensemble and drift baseline."""
         if self.ensemble is None:
             return
 
@@ -431,3 +434,33 @@ class AWARETrainer:
 
         self.ensemble.save(str(checkpoint_path))
         logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+        # Save drift baseline from collected training features
+        if hasattr(self, '_train_features') and self._train_features is not None:
+            try:
+                from ..monitoring.drift import DriftDetector
+
+                detector = DriftDetector()
+                feature_names = [
+                    'total_trades', 'win_rate', 'avg_trade_size', 'max_trade_size',
+                    'trade_frequency', 'avg_hold_hours', 'sharpe_ratio', 'sortino_ratio',
+                    'max_drawdown', 'profit_factor', 'avg_pnl', 'total_pnl',
+                    'unique_markets', 'market_concentration', 'active_days',
+                    'trades_per_day', 'morning_ratio', 'evening_ratio',
+                    'crypto_ratio', 'politics_ratio', 'sports_ratio',
+                    'avg_entry_odds', 'avg_exit_odds', 'maker_ratio',
+                    'price_improvement', 'execution_quality', 'slippage_avg',
+                    'streak_current', 'streak_max_win', 'streak_max_loss',
+                    'consecutive_wins', 'consecutive_losses', 'recovery_speed',
+                    'win_loss_ratio', 'risk_reward_ratio'
+                ]
+
+                n_features = self._train_features.shape[1]
+                detector.fit_baseline(self._train_features, feature_names[:n_features])
+
+                baseline_path = checkpoint_path.parent / 'drift_baseline.pkl'
+                detector.save_baseline(str(baseline_path))
+                logger.info(f"Saved drift baseline to {baseline_path}")
+
+            except Exception as e:
+                logger.warning(f"Failed to save drift baseline: {e}")

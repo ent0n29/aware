@@ -901,7 +901,9 @@ class InsiderDetector:
 
     def save_alerts(self, alerts: list[InsiderAlert]) -> int:
         """
-        Save alerts to ClickHouse for historical tracking.
+        Save alerts to ClickHouse for Java strategy-service to consume.
+
+        Writes to polybot.aware_alerts table which InsiderFollowStrategy reads.
 
         Args:
             alerts: List of InsiderAlert objects
@@ -909,39 +911,67 @@ class InsiderDetector:
         Returns:
             Number of alerts saved
         """
+        import json
+        import uuid
+
         if not alerts:
             return 0
 
-        # Prepare data for insert
+        # Map signal type to alert_type expected by Java
+        signal_to_alert_type = {
+            'NEW_ACCOUNT_WHALE': 'INSIDER_DETECTED',
+            'VOLUME_SPIKE': 'UNUSUAL_ACTIVITY',
+            'SMART_MONEY_DIVERGENCE': 'SMART_MONEY_ENTRY',
+            'WHALE_ANOMALY': 'UNUSUAL_ACTIVITY',
+        }
+
+        # Prepare data for insert into aware_alerts
         data = []
         for alert in alerts:
+            alert_type = signal_to_alert_type.get(
+                alert.signal_type.value, 'INSIDER_DETECTED'
+            )
+
+            # Build metadata JSON with details for strategy
+            metadata = json.dumps({
+                'signal_type': alert.signal_type.value,
+                'direction': alert.direction,
+                'confidence': alert.confidence,
+                'total_volume_usd': alert.total_volume_usd,
+                'num_traders': alert.num_traders,
+                'traders_involved': alert.traders_involved,
+            })
+
             data.append([
-                alert.signal_type.value,
-                alert.severity.value,
-                alert.market_slug,
-                alert.market_question,
-                alert.description,
-                alert.confidence,
-                alert.direction,
-                alert.total_volume_usd,
-                alert.num_traders,
-                alert.detected_at,
-                ','.join(alert.traders_involved),
+                str(uuid.uuid4()),          # id
+                alert_type,                  # alert_type
+                alert.severity.value,        # severity
+                'insider_detector',          # source
+                None,                        # username (nullable)
+                alert.market_slug,           # market_slug
+                None,                        # index_type (nullable)
+                f'{alert.signal_type.value}: {alert.direction}',  # title
+                alert.description,           # message
+                metadata,                    # metadata JSON
+                alert.detected_at,           # created_at
+                None,                        # expires_at (nullable)
+                None,                        # acknowledged_at
+                'ACTIVE',                    # status
             ])
 
         columns = [
-            'signal_type', 'severity', 'market_slug', 'market_question',
-            'description', 'confidence', 'direction', 'total_volume_usd',
-            'num_traders', 'detected_at', 'traders_involved'
+            'id', 'alert_type', 'severity', 'source', 'username',
+            'market_slug', 'index_type', 'title', 'message', 'metadata',
+            'created_at', 'expires_at', 'acknowledged_at', 'status'
         ]
 
         try:
             self.ch.insert(
-                'polybot.aware_insider_alerts',
+                'polybot.aware_alerts',
                 data,
                 column_names=columns
             )
-            logger.info(f"Saved {len(alerts)} insider alerts")
+            logger.info(f"Saved {len(alerts)} alerts to aware_alerts")
             return len(alerts)
         except Exception as e:
             logger.error(f"Failed to save alerts: {e}")
@@ -989,18 +1019,22 @@ def main():
 
     for alert in alerts:
         emoji = {
-            AlertSeverity.CRITICAL: "🚨",
-            AlertSeverity.HIGH: "⚠️",
-            AlertSeverity.MEDIUM: "📊",
-            AlertSeverity.LOW: "📝",
+            AlertSeverity.CRITICAL: "CRITICAL",
+            AlertSeverity.HIGH: "HIGH",
+            AlertSeverity.MEDIUM: "MEDIUM",
+            AlertSeverity.LOW: "LOW",
         }[alert.severity]
 
-        print(f"{emoji} [{alert.severity.value:8}] {alert.signal_type.value}")
+        print(f"[{emoji:8}] {alert.signal_type.value}")
         print(f"   Market: {alert.market_slug}")
         print(f"   {alert.description}")
         print(f"   Direction: {alert.direction}, Volume: ${alert.total_volume_usd:,.0f}")
         print(f"   Confidence: {alert.confidence:.0%}")
         print()
+
+    # Save alerts to ClickHouse for ALPHA-INSIDER strategy to consume
+    saved = detector.save_alerts(alerts)
+    print(f"Saved {saved} alerts to ClickHouse (aware_alerts table)")
 
 
 if __name__ == "__main__":

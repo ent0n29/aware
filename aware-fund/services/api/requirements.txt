@@ -3,3 +3,8 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 clickhouse-connect>=0.7.0
+requests>=2.31.0
+
+# Authentication & Rate Limiting
+slowapi>=0.1.9
+python-dotenv>=1.0.0

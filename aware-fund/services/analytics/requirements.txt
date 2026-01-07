@@ -1,5 +1,6 @@
 # AWARE Analytics Dependencies
 clickhouse-connect>=0.7.0
+clickhouse-driver>=0.2.6  # For NAV calculator
 httpx>=0.27.0  # For Gamma API requests
 
 # ML Dependencies

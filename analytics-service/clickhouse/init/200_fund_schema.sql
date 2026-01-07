@@ -185,24 +185,7 @@ FROM polybot.aware_psi_index FINAL
 ORDER BY index_type, weight DESC;
 
 -- Latest NAV per fund
-CREATE VIEW IF NOT EXISTS polybot.v_fund_nav_latest AS
-SELECT
-    fund_id,
-    nav,
-    capital,
-    position_value,
-    unrealized_pnl,
-    realized_pnl,
-    total_return,
-    max_drawdown,
-    open_positions,
-    ts as last_updated
-FROM polybot.aware_fund_nav_history
-WHERE (fund_id, ts) IN (
-    SELECT fund_id, max(ts)
-    FROM polybot.aware_fund_nav_history
-    GROUP BY fund_id
-);
+-- NOTE: v_fund_nav_latest moved to 300_user_investments.sql (depends on aware_fund_nav table there)
 
 -- Fund positions with market values
 -- Note: toFloat64 casts required to avoid ClickHouse Decimal scale mismatch errors

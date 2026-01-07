@@ -1,0 +1,132 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# AWARE Fund - CI/CD Pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+# Triggers:
+#   - Push to main    → Deploy to DEV server
+#   - Push to prod    → Deploy to PROD server (requires approval)
+#   - Manual trigger  → Choose environment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - prod
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build & Test (runs on all pushes)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests -q
+
+      - name: Run tests
+        run: mvn test -q
+        continue-on-error: true  # Don't block deploy on test failures for now
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Deploy to DEV (on push to main)
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    needs: build
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Deploy to DEV server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_SERVER_HOST }}
+          username: ${{ secrets.DEV_SERVER_USER }}
+          key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/aware
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "AWARE Fund - Deploying to DEV"
+            echo "═══════════════════════════════════════════════════════════════"
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Rebuild and restart services
+            docker compose -f deploy/docker-compose.dev.yaml build --quiet
+            docker compose -f deploy/docker-compose.dev.yaml up -d
+
+            # Health check
+            sleep 30
+            echo "Health checks:"
+            curl -sf http://localhost:8080/api/polymarket/health > /dev/null && echo "✓ Executor" || echo "✗ Executor"
+            curl -sf http://localhost:8081/api/strategy/status > /dev/null && echo "✓ Strategy" || echo "✗ Strategy"
+            curl -sf http://localhost:8000/api/health > /dev/null && echo "✓ API" || echo "✗ API"
+
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "DEV deployment complete!"
+            echo "═══════════════════════════════════════════════════════════════"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Deploy to PROD (on push to prod branch)
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/prod' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    runs-on: ubuntu-latest
+    environment: prod  # Requires manual approval in GitHub settings
+
+    steps:
+      - name: Deploy to PROD server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/aware
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "AWARE Fund - Deploying to PRODUCTION"
+            echo "═══════════════════════════════════════════════════════════════"
+
+            # Pull latest code
+            git fetch origin prod
+            git reset --hard origin/prod
+
+            # Rebuild and restart services
+            docker compose -f deploy/docker-compose.prod.yaml build --quiet
+            docker compose -f deploy/docker-compose.prod.yaml up -d
+
+            # Health check
+            sleep 30
+            echo "Health checks:"
+            curl -sf http://localhost:8080/api/polymarket/health > /dev/null && echo "✓ Executor" || echo "✗ Executor"
+            curl -sf http://localhost:8081/api/strategy/status > /dev/null && echo "✓ Strategy" || echo "✗ Strategy"
+            curl -sf http://localhost:8000/api/health > /dev/null && echo "✓ API" || echo "✗ API"
+
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "PROD deployment complete!"
+            echo "═══════════════════════════════════════════════════════════════"

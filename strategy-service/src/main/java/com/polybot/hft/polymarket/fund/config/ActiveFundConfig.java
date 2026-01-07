@@ -167,6 +167,42 @@ public record ActiveFundConfig(
     }
 
     /**
+     * Create arb-optimized configuration.
+     *
+     * Arbitrage strategy characteristics:
+     * - High confidence threshold (80%) since we only execute on clear opportunities
+     * - Short signal expiry (60s) as arb opportunities are time-sensitive
+     * - Conservative position sizing (1%) due to capital lockup until resolution
+     * - No execution delay (0ms) to capture edge before it disappears
+     * - Low daily trade limit (20) as each arb locks capital
+     */
+    public static ActiveFundConfig forArbStrategy(FundConfig base) {
+        return new ActiveFundConfig(
+                base.enabled(),
+                "ALPHA-ARB",
+                base.capitalUsd(),
+                base.maxPositionPct(),
+                base.minTradeUsd(),
+                base.maxSlippagePct(),
+                base.executionMode(),
+                base.riskLimits(),
+                // Arb-optimized: high confidence, fast execution
+                0.80,             // minConfidence: 80%+ (clear arb opportunities only)
+                0.3,              // minStrength: lower bar since edge is guaranteed
+                60,               // signalExpirySeconds: 60s (arbs are time-sensitive)
+                0.01,             // basePositionPct: 1% (capital locked until resolution)
+                0.05,             // maxSinglePositionPct: 5% (avoid overexposure)
+                0.3,              // confidenceScaling: low (size matters less for arb)
+                0,                // executionDelayMillis: 0ms (capture edge immediately)
+                10,               // maxConcurrentOrders: parallel execution for both legs
+                true,             // useAggressiveExecution: always cross spread
+                20,               // maxDailyTrades: limited (each arb = 2 trades)
+                base.capitalUsd().multiply(BigDecimal.valueOf(0.5)),
+                0.20              // maxCorrelatedExposurePct: 20% (lower for arb)
+        );
+    }
+
+    /**
      * Calculate position size for a given signal.
      *
      * @param confidence Signal confidence (0-1)

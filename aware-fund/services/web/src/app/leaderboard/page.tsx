@@ -11,9 +11,12 @@ import {
   Crown,
   Loader2,
   AlertCircle,
+  Brain,
+  Calculator,
 } from 'lucide-react'
 import { cn, formatCurrency, formatNumber } from '@/lib/utils'
 import { api, Trader } from '@/lib/api'
+import { MLScoreInline } from '@/components/traders/MLScoreBadge'
 
 const tiers = ['All', 'Diamond', 'Gold', 'Silver', 'Bronze']
 
@@ -147,13 +150,19 @@ export default function LeaderboardPage() {
           {/* Table Header */}
           <div className="grid grid-cols-12 gap-4 p-4 bg-slate-800/50 text-sm font-medium text-slate-400 border-b border-slate-800">
             <div className="col-span-1 text-center">#</div>
-            <div className="col-span-3">Trader</div>
+            <div className="col-span-2">Trader</div>
             <div
-              className="col-span-2 text-right cursor-pointer hover:text-white flex items-center justify-end gap-1"
+              className="col-span-1 text-right cursor-pointer hover:text-white flex items-center justify-end gap-1"
               onClick={() => setSortBy('smart_money_score')}
             >
               Score
               {sortBy === 'smart_money_score' && <ChevronDown className="h-4 w-4" />}
+            </div>
+            <div className="col-span-2 text-center">
+              <div className="flex items-center justify-center gap-1">
+                <Brain className="h-3.5 w-3.5 text-aware-400" />
+                <span>ML Score</span>
+              </div>
             </div>
             <div
               className="col-span-2 text-right cursor-pointer hover:text-white flex items-center justify-end gap-1"
@@ -196,6 +205,7 @@ export default function LeaderboardPage() {
           <div className="divide-y divide-slate-800">
             {filteredTraders.map((trader) => {
               const tierStyle = tierStyles[trader.tier] || tierStyles['BRONZE']
+              const hasMLScore = trader.ml_score !== undefined || trader.tier_confidence !== undefined
               return (
                 <Link
                   key={trader.proxy_address || trader.username}
@@ -222,16 +232,16 @@ export default function LeaderboardPage() {
                     )}
                   </div>
 
-                  {/* Trader */}
-                  <div className="col-span-3 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-aware-400 to-aware-600 flex items-center justify-center text-white font-bold">
+                  {/* Trader - reduced from col-span-3 to col-span-2 */}
+                  <div className="col-span-2 flex items-center gap-2">
+                    <div className="w-9 h-9 rounded-full bg-gradient-to-br from-aware-400 to-aware-600 flex items-center justify-center text-white font-bold text-sm">
                       {(trader.username || trader.proxy_address || '?').charAt(0).toUpperCase()}
                     </div>
-                    <div>
-                      <p className="font-medium text-white">{trader.username || `${trader.proxy_address?.slice(0, 6)}...${trader.proxy_address?.slice(-4)}`}</p>
+                    <div className="min-w-0">
+                      <p className="font-medium text-white text-sm truncate">{trader.username || `${trader.proxy_address?.slice(0, 6)}...`}</p>
                       <span
                         className={cn(
-                          'inline-flex px-2 py-0.5 text-xs font-medium rounded-full shadow-lg',
+                          'inline-flex px-1.5 py-0.5 text-[10px] font-medium rounded-full',
                           tierStyle.bg,
                           tierStyle.text,
                           tierStyle.glow
@@ -242,11 +252,28 @@ export default function LeaderboardPage() {
                     </div>
                   </div>
 
-                  {/* Score */}
-                  <div className="col-span-2 text-right">
-                    <span className="text-lg font-bold text-white">
-                      {(trader.smart_money_score || 0).toFixed(1)}
+                  {/* Score - reduced from col-span-2 to col-span-1 */}
+                  <div className="col-span-1 text-right">
+                    <span className="text-base font-bold text-white">
+                      {(trader.smart_money_score || 0).toFixed(0)}
                     </span>
+                  </div>
+
+                  {/* ML Score - NEW col-span-2 */}
+                  <div className="col-span-2 flex justify-center">
+                    {hasMLScore ? (
+                      <MLScoreInline
+                        score={trader.ml_score ?? trader.smart_money_score}
+                        tier={trader.tier}
+                        tierConfidence={trader.tier_confidence}
+                        modelVersion={trader.model_version}
+                      />
+                    ) : (
+                      <div className="flex items-center gap-1 text-slate-500">
+                        <Calculator className="w-3 h-3" />
+                        <span className="text-xs">Rule-based</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Total P&L */}

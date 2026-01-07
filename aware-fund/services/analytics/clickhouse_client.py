@@ -4,6 +4,7 @@ AWARE Analytics - ClickHouse Client
 Read/write operations for trader profiles and scores.
 """
 
+import os
 import logging
 from datetime import datetime
 from typing import Optional
@@ -55,12 +56,17 @@ class ClickHouseClient:
 
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 8123,
-        database: str = "polybot",
+        host: str = None,
+        port: int = None,
+        database: str = None,
         username: str = "default",
         password: str = ""
     ):
+        # Read from env vars with defaults
+        host = host or os.getenv('CLICKHOUSE_HOST', 'localhost')
+        port = port or int(os.getenv('CLICKHOUSE_PORT', '8123'))
+        database = database or os.getenv('CLICKHOUSE_DATABASE', 'polybot')
+
         self.client = clickhouse_connect.get_client(
             host=host,
             port=port,

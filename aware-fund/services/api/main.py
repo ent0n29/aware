@@ -28,12 +28,24 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
 import clickhouse_connect
+
+# Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# Authentication
+from auth import verify_api_key, optional_api_key, is_auth_enabled
+
+# Investment module (Custodial MVP)
+from investments import router as invest_router, funds_router
 
 # Add analytics to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'analytics'))
@@ -45,6 +57,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger('aware-api')
 
+# Initialize Rate Limiter
+# Default: 100 requests per minute per IP
+# Override with RATE_LIMIT env var (e.g., "200/minute")
+limiter = Limiter(key_func=get_remote_address)
+
 # Initialize FastAPI
 app = FastAPI(
     title="AWARE FUND API",
@@ -52,12 +69,18 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Attach rate limiter to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Add CORS middleware
 # Note: In production, replace "*" with specific allowed origins
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:3002",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
     "http://127.0.0.1:3002",
 ]
 
@@ -66,8 +89,12 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS if os.getenv('ENV', 'development') == 'production' else ["*"],
     allow_credentials=False,  # Don't allow credentials with wildcard origins
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
+
+# Register investment routers
+app.include_router(invest_router)
+app.include_router(funds_router)
 
 
 # ============================================================================
@@ -553,11 +580,14 @@ VALID_STRATEGIES = {'UNKNOWN', 'ARBITRAGEUR', 'MARKET_MAKER', 'DIRECTIONAL_FUNDA
 
 
 @app.get("/api/leaderboard", response_model=list[LeaderboardEntry])
+@limiter.limit("100/minute")
 async def get_leaderboard(
+    request: Request,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     tier: Optional[str] = Query(default=None),
-    strategy: Optional[str] = Query(default=None)
+    strategy: Optional[str] = Query(default=None),
+    api_key: Optional[str] = Depends(optional_api_key)
 ):
     """
     Get the AWARE leaderboard.
@@ -775,6 +805,71 @@ async def get_psi_10():
 
     except Exception as e:
         logger.error(f"Failed to get PSI-10: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/indices/{index_type}", response_model=PSIIndex)
+async def get_index_by_type(index_type: str):
+    """
+    Get any PSI index by type.
+
+    Supported index types: PSI-10, PSI-25, PSI-50, PSI-CRYPTO, PSI-POLITICS, PSI-SPORTS
+    """
+    try:
+        client = get_clickhouse_client()
+        index_upper = index_type.upper()
+
+        # Get index from aware_psi_index table
+        # Table columns: index_type, username, proxy_address, weight, total_score,
+        #                sharpe_ratio, strategy_type, created_at, rebalanced_at
+        query = """
+            SELECT
+                proxy_address,
+                username,
+                weight,
+                total_score,
+                rebalanced_at
+            FROM polybot.aware_psi_index FINAL
+            WHERE index_type = %(index_type)s
+            ORDER BY weight DESC
+        """
+
+        result = client.query(query, parameters={'index_type': index_upper})
+
+        if not result.result_rows:
+            raise HTTPException(status_code=404, detail=f"Index '{index_type}' not found")
+
+        composition = []
+        for i, row in enumerate(result.result_rows):
+            composition.append(IndexComposition(
+                rank=i + 1,
+                username=row[1] or '',
+                proxy_address=row[0],
+                smart_money_score=row[3] or 0,  # total_score
+                weight=float(row[2]) if row[2] else 0,
+                total_pnl=0  # Not stored in index table
+            ))
+
+        # Get last calculation time
+        calc_result = client.query(
+            "SELECT max(rebalanced_at) FROM polybot.aware_psi_index WHERE index_type = %(index_type)s",
+            parameters={'index_type': index_upper}
+        )
+        calculated_at = calc_result.result_rows[0][0] if calc_result.result_rows else datetime.utcnow()
+
+        return PSIIndex(
+            name=index_upper,
+            description=f"PSI {index_upper} index composition",
+            trader_count=len(composition),
+            total_weight=sum(c.weight for c in composition),
+            composition=composition,
+            calculated_at=calculated_at
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get index {index_type}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1474,32 +1569,34 @@ class FundPerformance(BaseModel):
 
 
 @app.get("/api/fund/nav", response_model=FundNAV)
-async def get_fund_nav(fund_id: str = Query(default="psi-10-main")):
+async def get_fund_nav(fund_id: str = Query(default="PSI-10")):
     """
     Get current NAV (Net Asset Value) for a fund.
 
     Returns the fund's current value, positions, and P&L.
+    Fund types: PSI-10, PSI-25, PSI-50, ALPHA-ARB, ALPHA-INSIDER, ALPHA-EDGE, ALPHA-CONSENSUS
     """
     try:
         client = get_clickhouse_client()
 
+        # v_fund_nav_latest view uses fund_type column
         query = """
         SELECT
-            fund_id,
-            nav,
+            fund_type,
+            nav_per_share,
             capital,
             position_value,
-            unrealized_pnl,
-            realized_pnl,
-            total_return,
-            open_positions,
-            ts
+            total_fund_value,
+            total_pnl,
+            daily_return_pct,
+            num_positions,
+            last_updated
         FROM polybot.v_fund_nav_latest
-        WHERE fund_id = %(fund_id)s
+        WHERE fund_type = %(fund_type)s
         LIMIT 1
         """
 
-        result = client.query(query, parameters={'fund_id': fund_id})
+        result = client.query(query, parameters={'fund_type': fund_id.upper()})
 
         if not result.result_rows:
             # Return default for new fund
@@ -1516,15 +1613,18 @@ async def get_fund_nav(fund_id: str = Query(default="psi-10-main")):
             )
 
         row = result.result_rows[0]
+        # View columns: fund_type(0), nav_per_share(1), capital(2), position_value(3),
+        #               total_fund_value(4), total_pnl(5), daily_return_pct(6),
+        #               num_positions(7), last_updated(8)
         return FundNAV(
             fund_id=row[0],
-            nav=float(row[1]),
-            capital=float(row[2]),
-            position_value=float(row[3]),
-            unrealized_pnl=float(row[4]),
-            realized_pnl=float(row[5]),
-            total_return=float(row[6]),
-            open_positions=int(row[7]),
+            nav=float(row[4]) if row[4] else 10000.0,  # total_fund_value
+            capital=float(row[2]) if row[2] else 0.0,
+            position_value=float(row[3]) if row[3] else 0.0,
+            unrealized_pnl=float(row[5]) if row[5] else 0.0,  # total_pnl
+            realized_pnl=0.0,  # Not tracked separately
+            total_return=float(row[6]) if row[6] else 0.0,  # daily_return_pct
+            open_positions=int(row[7]) if row[7] else 0,
             last_updated=row[8]
         )
 
@@ -1917,9 +2017,12 @@ class InsiderAlertsResponse(BaseModel):
 
 
 @app.get("/api/insider/alerts", response_model=InsiderAlertsResponse)
+@limiter.limit("30/minute")
 async def get_insider_alerts(
+    request: Request,
     hours: int = Query(default=48, ge=1, le=168),
-    min_confidence: float = Query(default=0.3, ge=0.0, le=1.0)
+    min_confidence: float = Query(default=0.3, ge=0.0, le=1.0),
+    api_key: Optional[str] = Depends(optional_api_key)
 ):
     """
     Get insider activity alerts.
@@ -2230,14 +2333,23 @@ async def get_trader_ml_enrichment(identifier: str):
 @app.get("/api/ml/health")
 async def get_ml_health():
     """
-    Get ML enrichment pipeline health status.
+    Get ML pipeline health status.
 
-    Shows when ML models last ran and coverage statistics.
+    Returns status matching MLHealthResponse interface:
+    - status: 'healthy' | 'degraded' | 'unhealthy'
+    - model_version: string
+    - scoring_method: 'ml_ensemble' | 'rule_based'
+    - traders_scored: number
+    - tier_distribution: Record<string, number>
+    - drift_status: 'normal' | 'warning' | 'critical'
+    - drift_ratio: number
+    - drifted_features: string[]
     """
     try:
         client = get_clickhouse_client()
 
-        result = client.query("""
+        # Get ML enrichment stats
+        enrichment_result = client.query("""
             SELECT
                 count() AS total_enriched,
                 countIf(is_anomaly = 1) AS anomalies,
@@ -2247,29 +2359,396 @@ async def get_ml_health():
             FROM polybot.aware_ml_enrichment FINAL
         """)
 
-        if result.result_rows:
-            row = result.result_rows[0]
-            minutes_ago = row[4] if row[4] else 9999
-            status = 'healthy' if minutes_ago < 120 else 'stale' if minutes_ago < 360 else 'outdated'
+        # Get scoring stats and model version from ML scores
+        scores_result = client.query("""
+            SELECT
+                count() AS traders_scored,
+                max(model_version) AS model_version,
+                max(calculated_at) AS last_scoring_at
+            FROM polybot.aware_ml_scores FINAL
+        """)
 
-            return {
-                'status': status,
-                'traders_enriched': int(row[0]),
-                'anomalies_detected': int(row[1]),
-                'active_clusters': int(row[2]),
-                'last_update': row[3].isoformat() if row[3] else None,
-                'minutes_since_update': int(minutes_ago),
-                'recommendation': 'ML pipeline healthy' if status == 'healthy' else 'Consider running ML enrichment job'
-            }
+        # Get tier distribution from smart money scores
+        tier_result = client.query("""
+            SELECT
+                tier,
+                count() AS count
+            FROM polybot.aware_smart_money_scores FINAL
+            WHERE tier != ''
+            GROUP BY tier
+        """)
+
+        tier_distribution = {}
+        for row in tier_result.result_rows:
+            tier_distribution[row[0]] = int(row[1])
+
+        # Ensure all tiers are present
+        for tier in ['DIAMOND', 'GOLD', 'SILVER', 'BRONZE']:
+            if tier not in tier_distribution:
+                tier_distribution[tier] = 0
+
+        # Parse enrichment stats
+        if enrichment_result.result_rows:
+            e_row = enrichment_result.result_rows[0]
+            minutes_ago = e_row[4] if e_row[4] else 9999
+        else:
+            minutes_ago = 9999
+
+        # Parse scoring stats
+        traders_scored = 0
+        model_version = 'rule_based_v1'
+        last_scoring_at = None
+        if scores_result.result_rows:
+            s_row = scores_result.result_rows[0]
+            traders_scored = int(s_row[0]) if s_row[0] else 0
+            model_version = s_row[1] if s_row[1] else 'rule_based_v1'
+            last_scoring_at = s_row[2].isoformat() if s_row[2] else None
+
+        # Determine scoring method from model version
+        scoring_method = 'ml_ensemble' if 'ensemble' in model_version.lower() else 'rule_based'
+
+        # Compute overall status
+        if minutes_ago < 120 and traders_scored > 0:
+            status = 'healthy'
+        elif minutes_ago < 360 or traders_scored > 0:
+            status = 'degraded'
+        else:
+            status = 'unhealthy'
+
+        # Compute drift status (based on data freshness for now)
+        if minutes_ago < 60:
+            drift_status = 'normal'
+            drift_ratio = 0.0
+        elif minutes_ago < 240:
+            drift_status = 'warning'
+            drift_ratio = min(0.3, minutes_ago / 800)
+        else:
+            drift_status = 'critical'
+            drift_ratio = min(0.8, minutes_ago / 500)
 
         return {
-            'status': 'no_data',
-            'traders_enriched': 0,
-            'recommendation': 'Run ML enrichment job to populate data'
+            'status': status,
+            'model_version': model_version,
+            'last_scoring_at': last_scoring_at,
+            'traders_scored': traders_scored,
+            'scoring_method': scoring_method,
+            'tier_distribution': tier_distribution,
+            'drift_status': drift_status,
+            'drift_ratio': drift_ratio,
+            'drifted_features': [] if drift_status == 'normal' else ['data_freshness']
         }
 
     except Exception as e:
         logger.error(f"Failed to get ML health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# FUND MANAGEMENT ENDPOINTS (Proxy to Java strategy-service)
+# ============================================================================
+
+import requests as http_requests
+
+STRATEGY_SERVICE_URL = os.getenv('STRATEGY_SERVICE_URL', 'http://localhost:8081')
+
+
+class FundStatus(BaseModel):
+    """Fund operational status from Java service."""
+    fund_id: str
+    fund_type: str
+    is_active: bool
+    capital_usd: float
+    position_count: int
+    pending_signals: int
+    last_trade_at: Optional[datetime]
+    daily_trades: int
+    daily_notional_usd: float
+    error_message: Optional[str]
+
+
+class FundActivateRequest(BaseModel):
+    """Request to activate a fund."""
+    fund_type: str
+    capital_usd: float = 10000.0
+
+
+class FundActivateResponse(BaseModel):
+    """Response after activating a fund."""
+    success: bool
+    fund_type: str
+    message: str
+
+
+@app.get("/api/fund/status")
+async def get_fund_operational_status(fund_type: str = Query(default="PSI-10")):
+    """
+    Get operational status of a fund from the Java strategy service.
+
+    Returns real-time status including active positions, pending signals, etc.
+    """
+    try:
+        # Try to fetch from Java strategy-service
+        response = http_requests.get(
+            f"{STRATEGY_SERVICE_URL}/api/strategy/fund/status",
+            params={'fundType': fund_type},
+            timeout=5
+        )
+
+        if response.ok:
+            data = response.json()
+            return {
+                'fund_type': fund_type,
+                'source': 'strategy_service',
+                'status': data
+            }
+
+        # Fallback to database if service unavailable
+        return await _get_fund_status_from_db(fund_type)
+
+    except http_requests.exceptions.RequestException:
+        # Strategy service not available, return DB status
+        return await _get_fund_status_from_db(fund_type)
+    except Exception as e:
+        logger.error(f"Failed to get fund status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _get_fund_status_from_db(fund_type: str) -> dict:
+    """Get fund status from database when strategy service is unavailable."""
+    try:
+        client = get_clickhouse_client()
+
+        # Get fund summary
+        result = client.query("""
+            SELECT
+                fund_type,
+                status,
+                total_aum,
+                nav_per_share,
+                num_depositors
+            FROM polybot.aware_fund_summary FINAL
+            WHERE fund_type = %(fund_type)s
+        """, parameters={'fund_type': fund_type})
+
+        if result.result_rows:
+            row = result.result_rows[0]
+            return {
+                'fund_type': row[0],
+                'source': 'database',
+                'status': {
+                    'is_active': row[1] == 'active',
+                    'total_aum': float(row[2]),
+                    'nav_per_share': float(row[3]),
+                    'num_depositors': int(row[4]),
+                    'strategy_service': 'unavailable'
+                }
+            }
+
+        return {
+            'fund_type': fund_type,
+            'source': 'database',
+            'status': {
+                'is_active': False,
+                'message': 'Fund not found'
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get fund status from DB: {e}")
+        return {
+            'fund_type': fund_type,
+            'source': 'error',
+            'status': {'error': str(e)}
+        }
+
+
+@app.post("/api/fund/activate")
+async def activate_fund(request: FundActivateRequest):
+    """
+    Activate a fund in the Java strategy service.
+
+    This starts the fund's trading logic (paper trading by default).
+    """
+    try:
+        response = http_requests.post(
+            f"{STRATEGY_SERVICE_URL}/api/strategy/fund/activate",
+            json={
+                'fundType': request.fund_type,
+                'capitalUsd': request.capital_usd
+            },
+            timeout=10
+        )
+
+        if response.ok:
+            data = response.json()
+            return FundActivateResponse(
+                success=True,
+                fund_type=request.fund_type,
+                message=data.get('message', 'Fund activated successfully')
+            )
+
+        return FundActivateResponse(
+            success=False,
+            fund_type=request.fund_type,
+            message=f"Strategy service returned: {response.status_code}"
+        )
+
+    except http_requests.exceptions.RequestException as e:
+        return FundActivateResponse(
+            success=False,
+            fund_type=request.fund_type,
+            message=f"Strategy service unavailable: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to activate fund: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/fund/pause")
+async def pause_fund(fund_type: str = Query(...)):
+    """
+    Pause trading for a fund.
+
+    The fund will stop taking new positions but will manage existing ones.
+    """
+    try:
+        response = http_requests.post(
+            f"{STRATEGY_SERVICE_URL}/api/strategy/fund/pause",
+            params={'fundType': fund_type},
+            timeout=10
+        )
+
+        if response.ok:
+            return {
+                'success': True,
+                'fund_type': fund_type,
+                'message': 'Fund paused successfully'
+            }
+
+        return {
+            'success': False,
+            'fund_type': fund_type,
+            'message': f"Strategy service returned: {response.status_code}"
+        }
+
+    except http_requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'fund_type': fund_type,
+            'message': f"Strategy service unavailable: {str(e)}"
+        }
+    except Exception as e:
+        logger.error(f"Failed to pause fund: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/fund/metrics")
+async def get_fund_metrics(fund_type: str = Query(default="PSI-10")):
+    """
+    Get Prometheus-style metrics for a fund.
+
+    Returns metrics suitable for monitoring dashboards.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        # Get fund metrics from multiple sources
+        metrics = {}
+
+        # NAV metrics
+        nav_result = client.query("""
+            SELECT nav_per_share, total_fund_value, total_pnl, num_positions
+            FROM polybot.v_fund_nav_latest
+            WHERE fund_type = %(fund_type)s
+        """, parameters={'fund_type': fund_type})
+
+        if nav_result.result_rows:
+            row = nav_result.result_rows[0]
+            metrics['aware_fund_nav_per_share'] = float(row[0])
+            metrics['aware_fund_total_value_usd'] = float(row[1])
+            metrics['aware_fund_total_pnl_usd'] = float(row[2])
+            metrics['aware_fund_position_count'] = int(row[3])
+
+        # Trade metrics (24h)
+        trade_result = client.query("""
+            SELECT
+                count() as trade_count,
+                sum(notional_usd) as total_notional
+            FROM polybot.aware_fund_trades
+            WHERE fund_id = %(fund_type)s
+              AND ts >= now() - INTERVAL 24 HOUR
+        """, parameters={'fund_type': fund_type})
+
+        if trade_result.result_rows:
+            row = trade_result.result_rows[0]
+            metrics['aware_fund_trades_24h'] = int(row[0])
+            metrics['aware_fund_volume_24h_usd'] = float(row[1] or 0)
+
+        # Execution metrics
+        exec_result = client.query("""
+            SELECT count() as signal_count
+            FROM polybot.aware_fund_executions
+            WHERE fund_id = %(fund_type)s
+              AND executed_at >= now() - INTERVAL 24 HOUR
+        """, parameters={'fund_type': fund_type})
+
+        if exec_result.result_rows:
+            metrics['aware_fund_signals_24h'] = int(exec_result.result_rows[0][0])
+
+        return {
+            'fund_type': fund_type,
+            'timestamp': datetime.utcnow().isoformat(),
+            'metrics': metrics
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get fund metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/fund/nav-history")
+async def get_fund_nav_history(
+    fund_type: str = Query(default="PSI-10"),
+    days: int = Query(default=30, ge=1, le=365)
+):
+    """
+    Get NAV history for a fund.
+
+    Returns time series data for charting NAV over time.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query(f"""
+            SELECT
+                calculated_at,
+                nav_per_share,
+                total_fund_value,
+                total_pnl,
+                daily_return_pct
+            FROM polybot.aware_fund_nav
+            WHERE fund_type = %(fund_type)s
+              AND calculated_at >= now() - INTERVAL {days} DAY
+            ORDER BY calculated_at ASC
+        """, parameters={'fund_type': fund_type})
+
+        data_points = []
+        for row in result.result_rows:
+            data_points.append({
+                'timestamp': row[0].isoformat() if row[0] else None,
+                'nav_per_share': float(row[1]),
+                'total_aum': float(row[2]),
+                'daily_return': float(row[4]) if row[4] else 0
+            })
+
+        return {
+            'fund_type': fund_type,
+            'days': days,
+            'data_points': data_points
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get NAV history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

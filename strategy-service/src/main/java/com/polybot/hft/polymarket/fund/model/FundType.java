@@ -37,6 +37,12 @@ public enum FundType {
      */
     PSI_POLITICS("PSI-POLITICS", FundStrategy.MIRROR, "Top political market traders"),
 
+    /**
+     * PSI-ALPHA: Highest alpha-generating traders across all categories.
+     * Selected for consistent outperformance and signal quality.
+     */
+    PSI_ALPHA("PSI-ALPHA", FundStrategy.MIRROR, "Highest alpha generators"),
+
 
     // ============== ACTIVE FUNDS (Proprietary) ==============
 

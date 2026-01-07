@@ -1,8 +1,0 @@
-spring:
-  config:
-    import: classpath:polybot-common.yaml
-  application:
-    name: infrastructure-orchestrator-service
-
-server:
-  port: 8084

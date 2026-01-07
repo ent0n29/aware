@@ -1,0 +1,163 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# AWARE Fund - Development Server Stack
+# ═══════════════════════════════════════════════════════════════════════════════
+# For testing on the server before production
+# - No SSL (use Cloudflare or similar for HTTPS in front)
+# - Debug logging enabled
+# - Paper trading mode only
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: aware-dev
+
+services:
+  # Infrastructure
+  redpanda:
+    image: redpandadata/redpanda:v24.2.11
+    container_name: aware-dev-redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      - --advertise-kafka-addr INTERNAL://redpanda:29092,EXTERNAL://redpanda:9092
+    volumes:
+      - dev_redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: aware-dev-clickhouse
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - ../analytics-service/clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ../analytics-service/clickhouse/users.d/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml:ro
+      - dev_clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Java Services
+  executor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: executor-service
+    container_name: aware-dev-executor
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: develop
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      HFT_MODE: PAPER
+      JAVA_OPTS: "-Xmx512m -Xms256m"
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  strategy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: strategy-service
+    container_name: aware-dev-strategy
+    depends_on:
+      - executor
+      - clickhouse
+    environment:
+      SPRING_PROFILES_ACTIVE: develop
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      EXECUTOR_BASE_URL: http://executor:8080
+      HFT_MODE: PAPER
+      JAVA_OPTS: "-Xmx1g -Xms512m"
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
+
+  ingestor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.java
+      args:
+        SERVICE: ingestor-service
+    container_name: aware-dev-ingestor
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: develop
+      CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      JAVA_OPTS: "-Xmx512m -Xms256m"
+    ports:
+      - "127.0.0.1:8083:8080"
+    restart: unless-stopped
+
+  # Python Services
+  analytics:
+    build:
+      context: ../aware-fund/services/analytics
+    container_name: aware-dev-analytics
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      LOG_LEVEL: DEBUG
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../aware-fund/services/api
+    container_name: aware-dev-api
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      LOG_LEVEL: DEBUG
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  # Web Dashboard
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    container_name: aware-dev-web
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "80:3000"  # Direct HTTP access for dev
+    restart: unless-stopped
+
+volumes:
+  dev_redpanda_data:
+  dev_clickhouse_data:
+
+networks:
+  default:
+    name: aware-dev-network

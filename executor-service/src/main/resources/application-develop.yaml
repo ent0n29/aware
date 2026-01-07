@@ -19,16 +19,16 @@ executor:
     fills-enabled: true
     fill-poll-millis: 250
     tob-max-age-millis: 5000
-    maker-fill-min-age-millis: 500        # Reduced from 1000ms to allow earlier maker fills
-    lead-lag-min-millis: 100              # Reduced from 200ms to allow faster hedges
-    maker-fill-probability-per-poll: 0.020
-    maker-fill-probability-multiplier-per-tick: 1.6
-    maker-fill-probability-max-per-poll: 0.08
+    maker-fill-min-age-millis: 250        # AGGRESSIVE: Reduced from 500ms for faster fills
+    lead-lag-min-millis: 50               # AGGRESSIVE: Reduced from 100ms for faster hedges
+    maker-fill-probability-per-poll: 0.035  # AGGRESSIVE: Increased from 0.020
+    maker-fill-probability-multiplier-per-tick: 1.8  # AGGRESSIVE: Increased from 1.6
+    maker-fill-probability-max-per-poll: 0.15  # AGGRESSIVE: Increased from 0.08
     maker-fill-fraction-of-remaining: 1.00
     # Queue-ahead model: fraction of best-bid size assumed ahead of us when we join the best bid.
     # Lower values increase tape-driven maker fills (closer to gab's ~55% maker mix).
-    maker-queue-factor-min: 0.10           # Minimum allowed value (validation constraint)
-    maker-queue-factor-max: 0.11           # Must be > min for random range
+    maker-queue-factor-min: 0.10           # Min allowed by validation (cannot go below 0.10)
+    maker-queue-factor-max: 0.12           # Slightly reduced from 0.15 for faster queue consumption
     trade-tape-enabled: true
     # Preferred: ClickHouse `market_ws_trades` (fed by WS last_trade_price prints with size+side+txHash).
     trade-tape-source: CLICKHOUSE_MARKET_WS_TRADES
@@ -37,7 +37,7 @@ executor:
     trade-tape-use-trade-timestamp: false
     trade-tape-fallback-enabled: true
     trade-tape-fallback-max-idle-millis: 1500
-    trade-tape-fallback-probability-scale: 0.40   # Increased from 0.25 to get more fills when tape stalls
+    trade-tape-fallback-probability-scale: 0.60   # AGGRESSIVE: Increased from 0.40 to get more fills when tape stalls
     trade-tape-bid-delta-cancel-scale: 0.25
     trade-tape-bid-delta-max-trade-lag-millis: 2000
     trade-tape-clickhouse-url: http://127.0.0.1:8123

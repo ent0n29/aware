@@ -230,4 +230,106 @@ public class ActiveFundConfiguration {
     public ActiveSignalProcessor edgeSignalProcessor(MLEdgeStrategy strategy) {
         return new ActiveSignalProcessor(strategy);
     }
+
+    // ============== ALPHA-ARB Configuration ==============
+
+    /**
+     * Create ActiveFundConfig for ALPHA-ARB fund.
+     * Complete-set arbitrage on binary markets.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "hft.fund", name = "index-type", havingValue = "ALPHA-ARB")
+    public ActiveFundConfig arbFundConfig(FundConfig fundConfig) {
+        ActiveFundConfig config = ActiveFundConfig.forArbStrategy(fundConfig);
+        log.info("Arb fund configuration loaded: type={}, capital=${}, minConfidence={}",
+                config.fundType(), config.capitalUsd(), config.minConfidence());
+        return config;
+    }
+
+    /**
+     * Create ArbStrategy for ALPHA-ARB fund.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "hft.fund", name = "index-type", havingValue = "ALPHA-ARB")
+    public ArbStrategy arbStrategy(
+            ActiveFundConfig config,
+            ExecutorApiClient executorApi,
+            JdbcTemplate jdbcTemplate,
+            FundRegistry fundRegistry,
+            MeterRegistry meterRegistry,
+            com.polybot.hft.polymarket.ws.ClobMarketWebSocketClient marketWs
+    ) {
+        ArbStrategy strategy = new ArbStrategy(
+                config,
+                executorApi,
+                jdbcTemplate,
+                Clock.systemUTC(),
+                meterRegistry,
+                marketWs
+        );
+
+        // Register with FundRegistry
+        if (config.enabled()) {
+            try {
+                FundType fundType = FundType.fromId(config.fundType());
+                fundRegistry.registerFund(config.fundType(), fundType, config.capitalUsd());
+                log.info("Registered {} with FundRegistry", config.fundType());
+            } catch (IllegalArgumentException e) {
+                log.warn("Unknown fund type '{}', skipping registry", config.fundType());
+            }
+        }
+
+        log.info("ArbStrategy created for ALPHA-ARB fund");
+        return strategy;
+    }
+
+    /**
+     * Scheduled task to poll for arb opportunities.
+     *
+     * Runs every 2 seconds to check for pricing inefficiencies.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "hft.fund", name = "index-type", havingValue = "ALPHA-ARB")
+    public ArbOpportunityPoller arbOpportunityPoller(ArbStrategy strategy) {
+        return new ArbOpportunityPoller(strategy);
+    }
+
+    @Slf4j
+    public static class ArbOpportunityPoller {
+        private final ArbStrategy strategy;
+
+        public ArbOpportunityPoller(ArbStrategy strategy) {
+            this.strategy = strategy;
+            log.info("ArbOpportunityPoller initialized - will poll for arb opportunities every 2 seconds");
+        }
+
+        @Scheduled(fixedRate = 2000)
+        public void pollForArbOpportunities() {
+            try {
+                strategy.pollForSignals();
+            } catch (Exception e) {
+                log.warn("Error polling for arb opportunities: {}", e.getMessage());
+            }
+        }
+
+        @Scheduled(fixedRate = 60000)
+        public void checkResolvedPositions() {
+            try {
+                strategy.checkResolvedPositions();
+            } catch (Exception e) {
+                log.warn("Error checking resolved positions: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Scheduled task to process queued signals for ALPHA-ARB.
+     *
+     * Runs every 50ms for faster execution (arb opportunities are time-sensitive).
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "hft.fund", name = "index-type", havingValue = "ALPHA-ARB")
+    public ActiveSignalProcessor arbSignalProcessor(ArbStrategy strategy) {
+        return new ActiveSignalProcessor(strategy);
+    }
 }

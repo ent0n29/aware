@@ -16,7 +16,7 @@ aware/
 ├── strategy-service/       # Strategies + Fund engine (port 8081)
 ├── ingestor-service/       # Data ingestion (port 8083)
 ├── analytics-service/      # ClickHouse schemas only (init/*.sql)
-├── infrastructure-orchestrator-service/  # Docker stack orchestration (port 8084)
+├── deploy/                 # Docker Compose configs & deployment scripts
 ├── research/               # Python analysis & research tools
 └── aware-fund/             # AWARE Fund product
     ├── services/analytics/ # Scoring, indices, detection jobs
@@ -205,7 +205,6 @@ Key environment variables:
 | executor-service | 8080 | Order execution |
 | strategy-service | 8081 | Trading strategies |
 | ingestor-service | 8083 | Data ingestion |
-| infrastructure-orchestrator | 8084 | Docker orchestration |
 | Python API | 8000 | AWARE Fund REST API |
 | Next.js Dashboard | 3000 | Web UI |
 | ClickHouse HTTP | 8123 | Database queries |

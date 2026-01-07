@@ -8,6 +8,8 @@ import com.polybot.hft.polymarket.strategy.model.GabagoolMarket;
 import com.polybot.hft.polymarket.strategy.model.MarketInventory;
 import com.polybot.hft.polymarket.strategy.model.OrderState;
 import com.polybot.hft.polymarket.strategy.service.BankrollService;
+import com.polybot.hft.polymarket.strategy.service.MomentumTracker;
+import com.polybot.hft.polymarket.strategy.service.MomentumTracker.MomentumSignal;
 import com.polybot.hft.polymarket.strategy.service.OrderManager;
 import com.polybot.hft.polymarket.strategy.service.OrderManager.CancelReason;
 import com.polybot.hft.polymarket.strategy.service.OrderManager.PlaceReason;
@@ -66,6 +68,7 @@ public class GabagoolDirectionalEngine {
     private final Map<String, MakerImprovePair> makerImproveByMarket = new ConcurrentHashMap<>();
     private final Map<String, FastTopUpDecision> fastTopUpDecisionByMarket = new ConcurrentHashMap<>();
     private final Map<String, Instant> edgeBelowCancelSince = new ConcurrentHashMap<>();
+    private final Map<String, MomentumSignal> lastMomentumSignal = new ConcurrentHashMap<>();
 
     private record FastTopUpDecision(Instant leadFillAt, boolean allowFastTopUp) {}
 
@@ -74,6 +77,7 @@ public class GabagoolDirectionalEngine {
     private PositionTracker positionTracker;
     private QuoteCalculator quoteCalculator;
     private OrderManager orderManager;
+    private MomentumTracker momentumTracker;
 
     @PostConstruct
     void startIfEnabled() {
@@ -95,6 +99,7 @@ public class GabagoolDirectionalEngine {
         positionTracker = new PositionTracker(executorApi, clock);
         quoteCalculator = new QuoteCalculator(bankrollService, properties, metricsService);
         orderManager = new OrderManager(executorApi, events, clock, runId);
+        momentumTracker = new MomentumTracker(clock);
 
         long periodMs = Math.max(100, cfg.refreshMillis());
         executor.scheduleAtFixedRate(() -> safeTick(cfg), 1000, periodMs, TimeUnit.MILLISECONDS);
@@ -176,6 +181,10 @@ public class GabagoolDirectionalEngine {
             edgeBelowCancelSince.remove(market.slug());
             hedgeHoldUntil.remove(hedgeKey(market, Direction.UP));
             hedgeHoldUntil.remove(hedgeKey(market, Direction.DOWN));
+            lastMomentumSignal.remove(market.slug());
+            if (momentumTracker != null) {
+                momentumTracker.removeMarket(market.slug());
+            }
             return;
         }
 
@@ -199,6 +208,11 @@ public class GabagoolDirectionalEngine {
 	            return;
 	        }
 
+	        // Record prices for momentum tracking
+	        if (momentumTracker != null) {
+	            momentumTracker.recordPrices(market.slug(), upBook, downBook);
+	        }
+
 	        // Target user very rarely trades when one leg is extremely cheap/expensive (liquidity + queue dynamics differ a lot).
 	        // Keep the replica inside a mid-range price band to avoid over-trading extreme-probability states.
 	        BigDecimal upBid = upBook.bestBid();
@@ -209,7 +223,9 @@ public class GabagoolDirectionalEngine {
 	        }
 	        BigDecimal minBid = upBid.min(downBid);
 	        BigDecimal maxBid = upBid.max(downBid);
-	        if (minBid.compareTo(BigDecimal.valueOf(0.10)) < 0 || maxBid.compareTo(BigDecimal.valueOf(0.90)) > 0) {
+	        // Widened from 0.10-0.90 to 0.05-0.95 to match gab's trading range
+	        // Gab trades at prices as low as 0.09, so 0.10 filter was too restrictive
+	        if (minBid.compareTo(BigDecimal.valueOf(0.05)) < 0 || maxBid.compareTo(BigDecimal.valueOf(0.95)) > 0) {
 	            orderManager.cancelMarketOrders(market, CancelReason.BOOK_OUT_OF_BAND, secondsToEnd);
 	            return;
 	        }
@@ -218,7 +234,7 @@ public class GabagoolDirectionalEngine {
 	        int[] skew = quoteCalculator.calculateSkewTicks(inv, cfg);
 	        int skewTicksUp = skew[0];
         int skewTicksDown = skew[1];
-        double[] sizeSkew = computeSizeSkewFactors(market);
+        double[] sizeSkew = computeSizeSkewFactors(market, upBid, downBid);
         double upSizeFactor = sizeSkew[0];
         double downSizeFactor = sizeSkew[1];
 
@@ -260,27 +276,45 @@ public class GabagoolDirectionalEngine {
         }
         BigDecimal edgeEps = BigDecimal.valueOf(0.000001);
 
-        if (plannedEdge.add(edgeEps).compareTo(cancelEdge) < 0) {
+        // Check momentum signal - relax edge requirements when momentum is strong
+        // Based on gabagool22 analysis: He often pays >$1.00 combined but wins 60%+ on direction
+        MomentumSignal momentumSignal = momentumTracker != null
+                ? momentumTracker.getSignal(market.slug())
+                : MomentumSignal.NEUTRAL;
+        boolean hasMomentum = momentumSignal != MomentumSignal.NEUTRAL;
+
+        // When momentum is strong, relax edge requirements but stay near break-even.
+        // RECALIBRATED: Previous -3%/-5% was too aggressive - SIM was placing orders at -9% edge!
+        // Gab may use momentum but likely stays closer to break-even.
+        BigDecimal momentumRelaxedCancelEdge = hasMomentum
+                ? BigDecimal.valueOf(-0.01)  // Allow -1% edge when momentum is strong (was -5%)
+                : cancelEdge;
+        BigDecimal momentumRelaxedEntryEdge = hasMomentum
+                ? BigDecimal.valueOf(0.0)    // Allow 0% edge for entry when momentum is strong (was -3%)
+                : entryEdge;
+
+        if (plannedEdge.add(edgeEps).compareTo(momentumRelaxedCancelEdge) < 0) {
             // Time hysteresis: avoid cancel-churn on brief edge dips.
             Instant since = edgeBelowCancelSince.computeIfAbsent(market.slug(), s -> now);
             long graceMillis = Math.max(750L, cfg.refreshMillis());
             long belowMillis = Math.max(0L, Duration.between(since, now).toMillis());
             if (belowMillis < graceMillis) {
-                log.debug("GABAGOOL: Hold {} - edge {} < cancelEdge {} ({}ms < grace {}ms)",
-                        market.slug(), plannedEdge, cancelEdge, belowMillis, graceMillis);
+                log.debug("GABAGOOL: Hold {} - edge {} < cancelEdge {} (momentum={}, {}ms < grace {}ms)",
+                        market.slug(), plannedEdge, momentumRelaxedCancelEdge, momentumSignal, belowMillis, graceMillis);
                 return;
             }
             edgeBelowCancelSince.remove(market.slug());
-            log.debug("GABAGOOL: Cancel {} - edge {} < cancelEdge {} ({}ms >= grace {}ms)",
-                    market.slug(), plannedEdge, cancelEdge, belowMillis, graceMillis);
+            log.debug("GABAGOOL: Cancel {} - edge {} < cancelEdge {} (momentum={}, {}ms >= grace {}ms)",
+                    market.slug(), plannedEdge, momentumRelaxedCancelEdge, momentumSignal, belowMillis, graceMillis);
             orderManager.cancelMarketOrders(market, CancelReason.INSUFFICIENT_EDGE, secondsToEnd);
             return;
         } else {
             edgeBelowCancelSince.remove(market.slug());
         }
 
-        if (plannedEdge.add(edgeEps).compareTo(entryEdge) < 0) {
-            log.debug("GABAGOOL: Holding {} - edge {} below entry {}", market.slug(), plannedEdge, entryEdge);
+        if (plannedEdge.add(edgeEps).compareTo(momentumRelaxedEntryEdge) < 0) {
+            log.debug("GABAGOOL: Holding {} - edge {} below entry {} (momentum={})",
+                    market.slug(), plannedEdge, momentumRelaxedEntryEdge, momentumSignal);
             return;
         }
 
@@ -715,28 +749,128 @@ public class GabagoolDirectionalEngine {
         return cfg.takerModeMaxSpread();
     }
 
-    private double[] computeSizeSkewFactors(GabagoolMarket market) {
+    /**
+     * Compute size skew factors based on PRICE LEVEL and momentum signal.
+     *
+     * KEY INSIGHT from gabagool22 analysis:
+     * - Gab buys EXPENSIVE sides (75% of DOWN buys at >50c, only 2% at <30c)
+     * - SIM was buying CHEAP sides (44% at <30c) - this is WRONG
+     *
+     * Price-Level Logic (PRIMARY):
+     * - When a side is CHEAP (<40c): SUPPRESS buying (skew factor 0.1-0.3)
+     * - When a side is MID (40c-60c): Normal buying (skew factor 0.7-1.0)
+     * - When a side is EXPENSIVE (>60c): FAVOR buying (skew factor 1.0)
+     *
+     * Momentum Logic (SECONDARY):
+     * - When UP price is RISING: bias toward LONG_UP
+     * - When UP price is FALLING: bias toward LONG_DOWN
+     * - When NEUTRAL: Use price-level skew
+     *
+     * The skew factor reduces size on the non-preferred leg.
+     */
+    private double[] computeSizeSkewFactors(GabagoolMarket market, BigDecimal upBid, BigDecimal downBid) {
         if (market == null || market.slug() == null) {
             return new double[]{1.0, 1.0};
         }
-        return marketSizeSkew.computeIfAbsent(market.slug(), slug -> {
-            // Target shows a meaningful, persistent per-market imbalance. A slightly wider skew
-            // range helps match the observed per-market filled-size imbalance distribution.
-            double minSkew = 0.25;
-            double maxSkew = 0.45;
-            double skew = ThreadLocalRandom.current().nextDouble(minSkew, maxSkew);
-            boolean skewUp = ThreadLocalRandom.current().nextBoolean();
-            double up = skewUp ? 1.0 : 1.0 - skew;
-            double down = skewUp ? 1.0 - skew : 1.0;
-            return new double[]{up, down};
-        });
+
+        // PRIMARY: Price-level based sizing (matches gab's 75% at >50c behavior)
+        double upPriceSkew = computePriceLevelSkew(upBid);
+        double downPriceSkew = computePriceLevelSkew(downBid);
+
+        // Get momentum signal
+        MomentumSignal signal = momentumTracker != null
+                ? momentumTracker.getSignal(market.slug())
+                : MomentumSignal.NEUTRAL;
+
+        // Check for momentum flip and log it
+        MomentumSignal lastSignal = lastMomentumSignal.get(market.slug());
+        if (lastSignal != null && signal != lastSignal && signal != MomentumSignal.NEUTRAL) {
+            log.info("GABAGOOL: Momentum FLIP on {} from {} to {}", market.slug(), lastSignal, signal);
+            marketSizeSkew.remove(market.slug());
+        }
+        if (signal != MomentumSignal.NEUTRAL) {
+            lastMomentumSignal.put(market.slug(), signal);
+        }
+
+        // SECONDARY: Momentum-based adjustment
+        double[] momentumSkew = switch (signal) {
+            case UP_RISING -> {
+                // Strong momentum up: favor UP position
+                double downMomentumSkew = 0.55 + ThreadLocalRandom.current().nextDouble(0.10);
+                yield new double[]{1.0, downMomentumSkew};
+            }
+            case UP_FALLING -> {
+                // Strong momentum down: favor DOWN position
+                double upMomentumSkew = 0.55 + ThreadLocalRandom.current().nextDouble(0.10);
+                yield new double[]{upMomentumSkew, 1.0};
+            }
+            case NEUTRAL -> new double[]{1.0, 1.0};
+        };
+
+        // Combine price-level and momentum skews (multiply them)
+        double finalUpSkew = upPriceSkew * momentumSkew[0];
+        double finalDownSkew = downPriceSkew * momentumSkew[1];
+
+        // Log when we suppress a cheap side
+        if (upPriceSkew < 0.5 || downPriceSkew < 0.5) {
+            log.debug("GABAGOOL: Price-level skew on {} - UP bid={} (skew={}), DOWN bid={} (skew={}), momentum={}",
+                    market.slug(), upBid, String.format("%.2f", upPriceSkew),
+                    downBid, String.format("%.2f", downPriceSkew), signal);
+        }
+
+        return new double[]{finalUpSkew, finalDownSkew};
+    }
+
+    /**
+     * Compute size skew factor based on price level.
+     *
+     * RECALIBRATED based on actual gabagool22 Dec 26-27 data:
+     * - <30c: 15.2% of trades
+     * - 30-40c: 15.4% of trades
+     * - 40-50c: 16.7% of trades
+     * - 50-60c: 17.6% of trades
+     * - >60c: 35.1% of trades (1.75x baseline)
+     *
+     * Previous values were too aggressive at suppressing cheap prices.
+     */
+    private double computePriceLevelSkew(BigDecimal bid) {
+        if (bid == null) {
+            return 0.8;
+        }
+
+        double price = bid.doubleValue();
+
+        if (price < 0.30) {
+            // Very cheap (<30c): Slight suppression (gab 15.2% vs baseline ~20%)
+            // skew = 15.2/20 = 0.76
+            return 0.70 + ThreadLocalRandom.current().nextDouble(0.10);
+        } else if (price < 0.40) {
+            // Cheap (30-40c): Slight suppression (gab 15.4% vs baseline ~20%)
+            // skew = 15.4/20 = 0.77
+            return 0.72 + ThreadLocalRandom.current().nextDouble(0.10);
+        } else if (price < 0.50) {
+            // Lower-mid (40-50c): Near baseline (gab 16.7% vs baseline ~20%)
+            // skew = 16.7/20 = 0.84
+            return 0.80 + ThreadLocalRandom.current().nextDouble(0.10);
+        } else if (price < 0.60) {
+            // Upper-mid (50-60c): Near baseline (gab 17.6% vs baseline ~20%)
+            // skew = 17.6/20 = 0.88
+            return 0.85 + ThreadLocalRandom.current().nextDouble(0.10);
+        } else {
+            // Expensive (>60c): BOOST (gab 35.1% vs baseline ~20%)
+            // skew = 35.1/20 = 1.76, but cap at 1.2 to avoid over-concentration
+            return 1.0 + ThreadLocalRandom.current().nextDouble(0.20);
+        }
     }
 
 	    private boolean shouldSkipLaggingLeg(double sizeFactor) {
 	        if (sizeFactor >= 0.999) {
 	            return false;
 	        }
-	        double quoteProb = 0.60; // Increase imbalance / reduce over-hedging vs baseline.
+	        // RECALIBRATED: Gab trades both sides nearly equally (47% Up, 53% Down).
+	        // Previous value 0.60 caused cheap UP to be skipped too often.
+	        // Increase to 0.95 to ensure both sides are quoted consistently.
+	        double quoteProb = 0.95;
 	        return ThreadLocalRandom.current().nextDouble() > quoteProb;
 	    }
 
@@ -808,10 +942,12 @@ public class GabagoolDirectionalEngine {
                 {10, 30},
                 {30, 60},
                 {60, 120},
-                {120, 180}
+                {120, 300}   // Extended to 300s to match gab's actual distribution (avg 211s for >120s bucket)
         };
-        // Approximate observed lead→lag latency distribution from clean data (2-5/5-10/10-30/30-60/60-120/120-180).
-        double[] weights = new double[]{0.36, 0.20, 0.25, 0.10, 0.07, 0.02};
+        // RECALIBRATED: Actual gabagool22 hedge delay distribution (Dec 26-27 data):
+        // GAB: 2-5s=4.8%, 5-10s=4.4%, 10-30s=10%, 30-60s=3.7%, 60-120s=29.5%, >120s=45.9%
+        // Previous weights were 7x too fast (36% at 2-5s vs gab's 4.8%)
+        double[] weights = new double[]{0.05, 0.05, 0.10, 0.04, 0.30, 0.46};
 
         double totalWeight = 0.0;
         long[] lower = new long[buckets.length];

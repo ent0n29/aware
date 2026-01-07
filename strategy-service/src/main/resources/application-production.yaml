@@ -1,0 +1,146 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# AWARE Fund - Production Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# This profile is activated via SPRING_PROFILES_ACTIVE=production
+# Sensitive values are loaded from environment variables
+# ═══════════════════════════════════════════════════════════════════════════════
+
+spring:
+  datasource:
+    url: ${CLICKHOUSE_URL:jdbc:clickhouse://clickhouse:8123/polybot}
+    driver-class-name: com.clickhouse.jdbc.ClickHouseDriver
+    username: ${CLICKHOUSE_USER:default}
+    password: ${CLICKHOUSE_PASSWORD:}
+
+hft:
+  # Trading mode: PAPER (simulation) or LIVE (real money!)
+  mode: ${HFT_MODE:PAPER}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # AWARE Fund Configuration
+  # ═══════════════════════════════════════════════════════════════════════════
+  fund:
+    enabled: true
+    index-type: PSI-10
+    capital-usd: ${FUND_CAPITAL_USD:10000}
+    max-position-pct: 0.10
+    min-trade-usd: 10
+    rebalance-interval-seconds: 60
+    signal-delay-seconds: 5
+    max-slippage-pct: 0.02
+    execution-mode: LIMIT_THEN_MARKET
+    risk-limits:
+      max-daily-loss-usd: ${MAX_DAILY_LOSS_USD:500}
+      max-drawdown-pct: 0.10
+      max-open-positions: 50
+      max-single-market-exposure-usd: 1000
+      kill-switch-active: false
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Multi-Fund Mode Configuration
+  # ═══════════════════════════════════════════════════════════════════════════
+  multi-fund:
+    enabled: true
+    total-capital-usd: ${TOTAL_CAPITAL_USD:100000}
+
+    funds:
+      # TIER 1: PSI Mirror Funds
+      PSI-10:
+        enabled: true
+        capital-pct: 15
+        max-position-pct: 0.10
+        min-trade-usd: 10
+
+      PSI-25:
+        enabled: true
+        capital-pct: 10
+        max-position-pct: 0.08
+        min-trade-usd: 10
+
+      PSI-CRYPTO:
+        enabled: true
+        capital-pct: 10
+        max-position-pct: 0.10
+        min-trade-usd: 10
+
+      PSI-SPORTS:
+        enabled: true
+        capital-pct: 5
+        max-position-pct: 0.15
+        min-trade-usd: 10
+
+      PSI-ALPHA:
+        enabled: true
+        capital-pct: 10
+        max-position-pct: 0.12
+        min-trade-usd: 10
+
+      # TIER 2: Alpha Active Funds
+      ALPHA-ARB:
+        enabled: true
+        capital-pct: 15
+        max-position-pct: 0.05
+        min-trade-usd: 20
+
+      ALPHA-INSIDER:
+        enabled: true
+        capital-pct: 17
+        max-position-pct: 0.15
+        min-trade-usd: 25
+
+      ALPHA-EDGE:
+        enabled: true
+        capital-pct: 18
+        max-position-pct: 0.10
+        min-trade-usd: 20
+
+  events:
+    enabled: true
+    market-ws-snapshot-publish-millis: 1000
+    market-ws-cache-publish-on-start: true
+
+  executor:
+    base-url: ${EXECUTOR_BASE_URL:http://executor:8080}
+    send-live-ack: ${HFT_MODE:PAPER} == "LIVE"
+
+  risk:
+    kill-switch: false
+    max-order-notional-usd: ${MAX_ORDER_NOTIONAL_USD:1000}
+    max-order-size: 100
+
+  polymarket:
+    market-ws-enabled: true
+    gamma-url: https://gamma-api.polymarket.com
+    market-ws-cache-path: /tmp/market-ws-cache.json
+    market-ws-cache-flush-millis: 5000
+
+  strategy:
+    gabagool:
+      enabled: true
+      refresh-millis: 1500
+      min-replace-millis: 2000
+      force-replace-millis: 20000
+      min-seconds-to-end: 0
+      max-seconds-to-end: 3600
+      improve-ticks: 0
+      quote-size: 18
+      bankroll-mode: FIXED
+      bankroll-usd: ${GABAGOOL_BANKROLL_USD:10000}
+
+# Production logging (less verbose)
+logging:
+  level:
+    root: INFO
+    com.polybot.hft: INFO
+    com.polybot.hft.polymarket.strategy: INFO
+    org.springframework: WARN
+
+# Actuator endpoints for health checks
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized

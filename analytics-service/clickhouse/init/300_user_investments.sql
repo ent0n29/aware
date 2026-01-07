@@ -227,6 +227,8 @@ INSERT INTO polybot.aware_fund_summary
 VALUES
 ('PSI-10', 'active', 0, 0, 1.0, 0, 0, 0, 0, 0, 0.005, 0.10, 10,
  'Top 10 Smart Money traders by score. Mirrors their positions proportionally.', today()),
+('PSI-25', 'active', 0, 0, 1.0, 0, 0, 0, 0, 0, 0.005, 0.10, 10,
+ 'Top 25 Smart Money traders by score. Broader diversification than PSI-10.', today()),
 ('PSI-SPORTS', 'active', 0, 0, 1.0, 0, 0, 0, 0, 0, 0.005, 0.10, 10,
  'Top sports betting specialists. Focus on NFL, NBA, Soccer markets.', today()),
 ('PSI-CRYPTO', 'active', 0, 0, 1.0, 0, 0, 0, 0, 0, 0.005, 0.10, 10,

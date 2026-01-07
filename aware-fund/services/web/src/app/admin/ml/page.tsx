@@ -13,9 +13,13 @@ import {
   Clock,
   Users,
   RefreshCw,
+  TrendingUp,
+  History,
+  Target,
+  Zap,
 } from 'lucide-react'
 import { cn, formatNumber, getTimeAgo } from '@/lib/utils'
-import { api, MLHealthResponse } from '@/lib/api'
+import { api, MLHealthResponse, ModelInfoResponse, FeatureImportanceResponse, TrainingRunResponse } from '@/lib/api'
 
 // Tier colors for distribution chart
 const tierColors: Record<string, string> = {
@@ -49,33 +53,49 @@ const driftStatusConfig: Record<string, { icon: typeof CheckCircle; color: strin
 
 export default function MLMonitoringPage() {
   const [health, setHealth] = useState<MLHealthResponse | null>(null)
+  const [modelInfo, setModelInfo] = useState<ModelInfoResponse | null>(null)
+  const [featureImportance, setFeatureImportance] = useState<FeatureImportanceResponse | null>(null)
+  const [trainingHistory, setTrainingHistory] = useState<TrainingRunResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  const fetchHealth = async () => {
+  const fetchAllData = async () => {
     try {
       setError(null)
-      const data = await api.getMLHealth()
-      setHealth(data)
+      const [healthData, modelData, featuresData, historyData] = await Promise.all([
+        api.getMLHealth().catch(() => null),
+        api.getModelInfo().catch(() => null),
+        api.getFeatureImportance(15).catch(() => null),
+        api.getTrainingHistory(5).catch(() => null),
+      ])
+
+      if (healthData) setHealth(healthData)
+      if (modelData) setModelInfo(modelData)
+      if (featuresData) setFeatureImportance(featuresData)
+      if (historyData) setTrainingHistory(historyData)
+
+      if (!healthData && !modelData) {
+        setError('Failed to load ML health status')
+      }
     } catch (err) {
-      console.error('Failed to fetch ML health:', err)
+      console.error('Failed to fetch ML data:', err)
       setError('Failed to load ML health status')
     }
   }
 
   useEffect(() => {
     setIsLoading(true)
-    fetchHealth().finally(() => setIsLoading(false))
+    fetchAllData().finally(() => setIsLoading(false))
 
     // Auto-refresh every 60 seconds
-    const interval = setInterval(fetchHealth, 60000)
+    const interval = setInterval(fetchAllData, 60000)
     return () => clearInterval(interval)
   }, [])
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await fetchHealth()
+    await fetchAllData()
     setIsRefreshing(false)
   }
 
@@ -321,6 +341,137 @@ export default function MLMonitoringPage() {
               </div>
             </div>
           </div>
+
+          {/* Model Accuracy Metrics */}
+          {modelInfo && (
+            <div className="grid md:grid-cols-3 gap-4">
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-6">
+                <div className="flex items-center gap-3 mb-2">
+                  <Target className="w-6 h-6 text-green-400" />
+                  <span className="text-slate-300 text-sm">Tier Accuracy</span>
+                </div>
+                <p className="text-2xl font-bold text-white">
+                  {(modelInfo.tier_accuracy * 100).toFixed(1)}%
+                </p>
+                <p className="text-xs text-slate-500 mt-1">Model classification accuracy</p>
+              </div>
+
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-6">
+                <div className="flex items-center gap-3 mb-2">
+                  <TrendingUp className="w-6 h-6 text-blue-400" />
+                  <span className="text-slate-300 text-sm">Sharpe MAE</span>
+                </div>
+                <p className="text-2xl font-bold text-white">
+                  {modelInfo.sharpe_mae.toFixed(3)}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">Mean absolute error on Sharpe</p>
+              </div>
+
+              <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-6">
+                <div className="flex items-center gap-3 mb-2">
+                  <Users className="w-6 h-6 text-purple-400" />
+                  <span className="text-slate-300 text-sm">Trained On</span>
+                </div>
+                <p className="text-2xl font-bold text-white">
+                  {formatNumber(modelInfo.n_traders_trained, 0)}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">Traders in training set</p>
+              </div>
+            </div>
+          )}
+
+          {/* Feature Importance Section */}
+          {featureImportance && featureImportance.features.length > 0 && (
+            <div className="rounded-xl bg-slate-900/50 border border-slate-800 overflow-hidden">
+              <div className="p-4 border-b border-slate-800">
+                <h3 className="font-semibold text-white flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-yellow-400" />
+                  Top Feature Importance
+                </h3>
+              </div>
+
+              <div className="p-6">
+                <div className="space-y-3">
+                  {featureImportance.features.slice(0, 10).map((feature, idx) => {
+                    const maxImportance = featureImportance.features[0]?.importance || 1
+                    const percentage = (feature.importance / maxImportance) * 100
+
+                    return (
+                      <div key={feature.name} className="flex items-center gap-4">
+                        <div className="w-8 text-sm text-slate-500">#{idx + 1}</div>
+                        <div className="w-40 text-sm font-medium text-slate-300 truncate">
+                          {feature.name}
+                        </div>
+                        <div className="flex-1 h-6 bg-slate-800 rounded overflow-hidden relative">
+                          <div
+                            className="h-full bg-gradient-to-r from-aware-500 to-aware-400 rounded transition-all"
+                            style={{ width: `${percentage}%` }}
+                          />
+                        </div>
+                        <div className="w-16 text-right text-sm text-slate-400">
+                          {feature.importance.toFixed(3)}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Training History Section */}
+          {trainingHistory && trainingHistory.runs.length > 0 && (
+            <div className="rounded-xl bg-slate-900/50 border border-slate-800 overflow-hidden">
+              <div className="p-4 border-b border-slate-800">
+                <h3 className="font-semibold text-white flex items-center gap-2">
+                  <History className="w-5 h-5 text-slate-400" />
+                  Training History
+                </h3>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-slate-800/50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Version</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Trigger</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Accuracy</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {trainingHistory.runs.map((run) => (
+                      <tr key={run.run_id} className="hover:bg-slate-800/30">
+                        <td className="px-4 py-3 text-sm font-mono text-white">{run.model_version}</td>
+                        <td className="px-4 py-3 text-sm text-slate-400">
+                          {run.completed_at ? getTimeAgo(run.completed_at) : 'In progress'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={cn(
+                            'px-2 py-1 text-xs rounded-full',
+                            run.status === 'success' ? 'bg-green-500/20 text-green-400' :
+                            run.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+                            'bg-yellow-500/20 text-yellow-400'
+                          )}>
+                            {run.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-slate-400">{run.trigger_reason || '-'}</td>
+                        <td className="px-4 py-3 text-sm text-right text-slate-300">
+                          {run.tier_accuracy ? `${(run.tier_accuracy * 100).toFixed(1)}%` : '-'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-right text-slate-400">
+                          {run.duration_seconds ? `${Math.round(run.duration_seconds / 60)}m` : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Last Update Info */}
           <div className="flex items-center justify-center gap-2 text-sm text-slate-500">

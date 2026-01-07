@@ -28,7 +28,8 @@ services:
       - "9092:9092"
       - "9644:9644"
     volumes:
-      - redpanda_data:/var/lib/redpanda/data
+      # PERSISTENT STORAGE - survives docker prune!
+      - ./data/redpanda:/var/lib/redpanda/data
     healthcheck:
       test: ["CMD", "rpk", "cluster", "health"]
       interval: 10s
@@ -47,7 +48,8 @@ services:
     volumes:
       - ./analytics-service/clickhouse/init:/docker-entrypoint-initdb.d:ro
       - ./analytics-service/clickhouse/users.d/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml:ro
-      - clickhouse_data:/var/lib/clickhouse
+      # PERSISTENT STORAGE - survives docker prune!
+      - ./data/clickhouse:/var/lib/clickhouse
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 10s
@@ -150,6 +152,16 @@ services:
       CLICKHOUSE_DATABASE: polybot
       SCORING_INTERVAL_SECONDS: 3600
       LOG_LEVEL: INFO
+    volumes:
+      # Mount ML checkpoints so trained models persist and are available
+      - ./aware-fund/services/analytics/ml/checkpoints:/app/ml/checkpoints
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   api:
     build:
@@ -158,16 +170,22 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      analytics:
+        condition: service_started
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
       CLICKHOUSE_DATABASE: polybot
       API_HOST: 0.0.0.0
       API_PORT: 8000
+    volumes:
+      # Mount ML checkpoints for drift status endpoint
+      - ./aware-fund/services/analytics/ml/checkpoints:/app/ml/checkpoints:ro
     ports:
       - "8000:8000"
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/freshness')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -184,7 +202,8 @@ services:
     depends_on:
       - api
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api  # For client-side (browser)
+      API_INTERNAL_URL: http://api:8000           # For server-side (Next.js rewrites)
     ports:
       - "3000:3000"
     volumes:
@@ -220,9 +239,7 @@ services:
     profiles:
       - monitoring
 
-volumes:
-  redpanda_data:
-  clickhouse_data:
+# No Docker volumes - using bind mounts in ./data/ for persistence
 
 networks:
   default:

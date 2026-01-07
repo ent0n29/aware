@@ -71,7 +71,28 @@ export default function AllFundsPage() {
     async function fetchFunds() {
       try {
         const data = await api.getFunds()
-        setFunds(data.funds)
+        // Handle both array response and {funds: [...]} response
+        const rawFunds = Array.isArray(data) ? data : (data?.funds || [])
+        // Map API response to expected FundInfo format
+        const fundsList = rawFunds.map((f: any) => ({
+          fund_id: f.fund_id || f.fund_type,
+          fund_type: f.fund_type?.startsWith('PSI') ? 'MIRROR' : 'ACTIVE',
+          name: f.name || f.fund_type,
+          description: f.description || '',
+          nav_per_share: parseFloat(f.nav_per_share) || 1,
+          total_aum: parseFloat(f.total_aum) || 0,
+          total_shares: f.total_shares || 0,
+          performance_1d: f.performance_1d || f.return_24h_pct || 0,
+          performance_7d: f.performance_7d || f.return_7d_pct || 0,
+          performance_30d: f.performance_30d || f.return_30d_pct || 0,
+          sharpe_ratio: f.sharpe_ratio || 0,
+          max_drawdown: f.max_drawdown || 0,
+          management_fee: f.management_fee || f.management_fee_pct || 0,
+          performance_fee: f.performance_fee || f.performance_fee_pct || 0,
+          inception_date: f.inception_date || '',
+          is_active: f.is_active ?? f.status === 'active',
+        }))
+        setFunds(fundsList)
       } catch (err) {
         console.error('Failed to fetch funds:', err)
         setError('Failed to load funds')
@@ -84,13 +105,13 @@ export default function AllFundsPage() {
 
   // Filter funds
   const filteredFunds = filterType === 'ALL'
-    ? funds
-    : funds.filter(f => f.fund_type === filterType)
+    ? (funds || [])
+    : (funds || []).filter(f => f.fund_type === filterType)
 
   // Calculate totals
-  const totalAUM = funds.reduce((sum, f) => sum + f.total_aum, 0)
-  const avgPerformance = funds.length > 0
-    ? funds.reduce((sum, f) => sum + f.performance_30d, 0) / funds.length
+  const totalAUM = (funds || []).reduce((sum, f) => sum + (f.total_aum || 0), 0)
+  const avgPerformance = (funds?.length || 0) > 0
+    ? (funds || []).reduce((sum, f) => sum + (f.performance_30d || 0), 0) / funds.length
     : 0
 
   return (

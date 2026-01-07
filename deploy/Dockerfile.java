@@ -16,7 +16,6 @@ COPY executor-service/pom.xml executor-service/
 COPY strategy-service/pom.xml strategy-service/
 COPY ingestor-service/pom.xml ingestor-service/
 COPY analytics-service/pom.xml analytics-service/
-COPY infrastructure-orchestrator-service/pom.xml infrastructure-orchestrator-service/
 
 # Download dependencies (cached layer)
 RUN mvn dependency:go-offline -B -pl ${SERVICE} -am

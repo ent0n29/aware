@@ -315,7 +315,7 @@ class MLScoringJob:
                 for s in scores
             ]
 
-            self.ch_client.client.insert(
+            self.ch_client.insert(
                 'polybot.aware_smart_money_scores',
                 smart_money_records,
                 column_names=[
@@ -353,7 +353,7 @@ class MLScoringJob:
                 for s in scores
             ]
 
-            self.ch_client.client.insert(
+            self.ch_client.insert(
                 'polybot.aware_ml_scores',
                 ml_records,
                 column_names=[

@@ -216,11 +216,10 @@ class AnomalyDetector:
     def _get_traders_to_scan(self) -> list[str]:
         """Get traders with sufficient activity to analyze"""
         query = """
-        SELECT DISTINCT username
+        SELECT DISTINCT proxy_address
         FROM polybot.aware_global_trades
         WHERE ts >= now() - INTERVAL 30 DAY
-          AND username != ''
-        GROUP BY username
+        GROUP BY proxy_address
         HAVING count() >= 20
         LIMIT 5000
         """

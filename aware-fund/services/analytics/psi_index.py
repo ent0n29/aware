@@ -392,7 +392,8 @@ class PSIIndexBuilder:
             AND days_active >= {config.min_days_active}
             AND total_volume_usd >= {config.min_volume_usd}
             AND sharpe_ratio >= {config.min_sharpe}
-            AND username != ''
+            -- NOTE: Username filter removed - usernames not ingested yet
+            -- Traders identified by proxy_address (wallet) instead
         ORDER BY total_score DESC
         LIMIT 1000
         """

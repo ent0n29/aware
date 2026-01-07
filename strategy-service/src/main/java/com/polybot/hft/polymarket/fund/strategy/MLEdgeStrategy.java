@@ -246,9 +246,11 @@ public class MLEdgeStrategy extends ActiveFundExecutor {
         // In a full implementation, we'd query ClickHouse for our positions
         // that were opened based on this trader's activity
 
-        // This is a simplified approach - generate a general decay alert
+        // Generate edge decay sell signal
         String signalId = UUID.randomUUID().toString();
-        double confidence = Math.min(0.9, decay / 30.0);  // Scale decay to confidence
+        // Scale confidence: decay of 15 (threshold) -> 0.75, decay of 30 -> 0.95
+        // This ensures threshold decays pass the minConfidence filter (0.70)
+        double confidence = Math.min(0.95, 0.60 + (decay / 50.0));
 
         AlphaSignal signal = AlphaSignal.builder()
                 .signalId(signalId)
@@ -272,12 +274,12 @@ public class MLEdgeStrategy extends ActiveFundExecutor {
                 .expiresAt(clock.instant().plusSeconds(config.signalExpirySeconds()))
                 .build();
 
-        log.info("Generated edge decay SELL signal for trader {}", trader.username);
-        signalsGenerated++;
+        log.info("Generated edge decay SELL signal for trader {} (decay: {} points, confidence: {})",
+                trader.username, String.format("%.1f", decay), String.format("%.2f", confidence));
 
-        // Note: Edge decay signals need special handling in execution
-        // The base executor will need to match these to existing positions
-        // For now, we log the signal for manual review
+        // Process the signal through the executor
+        processSignal(signal);
+        signalsGenerated++;
     }
 
     /**

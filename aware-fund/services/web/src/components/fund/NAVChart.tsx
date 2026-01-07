@@ -48,7 +48,7 @@ export function NAVChart({
       setError(null)
       try {
         const response = await api.getFundNAVHistory(fundId, selectedRange)
-        setData(response.data_points)
+        setData(response?.data_points || [])
       } catch (err) {
         console.error('Failed to fetch NAV history:', err)
         setError('Failed to load chart data')
@@ -62,7 +62,7 @@ export function NAVChart({
   }, [fundId, selectedRange])
 
   // Format data for chart
-  const chartData = data.map(point => ({
+  const chartData = (data || []).map(point => ({
     date: new Date(point.timestamp).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -216,6 +216,10 @@ export function NAVChartMini({
   height?: number
   className?: string
 }) {
+  if (!data || data.length === 0) {
+    return <div className={className} style={{ height }} />
+  }
+
   const chartData = data.map(point => ({
     nav: point.nav_per_share,
   }))

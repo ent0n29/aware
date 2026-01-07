@@ -151,7 +151,6 @@ class HiddenAlphaDiscovery:
                 sharpe_ratio >= {self.config.min_sharpe_for_gem}
                 AND total_volume_usd <= {self.config.max_volume_for_hidden}
                 AND total_trades >= {self.config.min_trades_for_gem}
-                AND username != ''
         ),
         -- Calculate percentile ranks for quality metrics
         ranked AS (
@@ -293,7 +292,6 @@ class HiddenAlphaDiscovery:
                 AND win_rate >= {self.config.min_win_rate_star}
                 AND sharpe_ratio >= {self.config.min_sharpe_star}
                 AND total_trades >= 10
-                AND username != ''
         ),
         -- Calculate performance relative to tenure
         performance_adjusted AS (
@@ -453,7 +451,6 @@ class HiddenAlphaDiscovery:
             unique_markets <= 5
             AND total_trades >= 20
             AND sharpe_ratio >= 1.0
-            AND username != ''
         ORDER BY sharpe_ratio DESC
         LIMIT {self.config.max_discoveries_per_type}
         """
@@ -523,7 +520,6 @@ class HiddenAlphaDiscovery:
             AND total_pnl > 0
             AND sharpe_ratio >= 0.5
             AND total_trades >= 20
-            AND username != ''
         ORDER BY total_pnl DESC
         LIMIT {self.config.max_discoveries_per_type}
         """

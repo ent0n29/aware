@@ -280,6 +280,49 @@ def run_anomaly_detection(ch_client) -> dict:
         return {'status': 'error', 'error': str(e)}
 
 
+def run_insider_detection(ch_client) -> dict:
+    """Run insider trading pattern detection"""
+    logger.info("Running insider detection...")
+    start = time.time()
+
+    try:
+        from insider_detector import InsiderDetector
+
+        detector = InsiderDetector(ch_client)
+        alerts = detector.scan_for_insider_activity()
+
+        by_severity = {}
+        by_signal = {}
+        for a in alerts:
+            sev = a.severity.value
+            sig = a.signal_type.value
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            by_signal[sig] = by_signal.get(sig, 0) + 1
+
+        # Save alerts to aware_alerts table
+        saved = 0
+        if alerts:
+            saved = detector.save_alerts(alerts)
+
+        elapsed = time.time() - start
+        logger.info(f"Found {len(alerts)} insider alerts, saved {saved} in {elapsed:.1f}s")
+
+        return {
+            'status': 'success',
+            'total_alerts': len(alerts),
+            'saved_alerts': saved,
+            'by_severity': by_severity,
+            'by_signal': by_signal,
+            'elapsed_seconds': elapsed
+        }
+
+    except Exception as e:
+        logger.error(f"Insider detection failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'status': 'error', 'error': str(e)}
+
+
 def run_ml_enrichment(ch_client) -> dict:
     """Run ML enrichment (Strategy DNA clustering + Anomaly Detection)"""
     logger.info("Running ML enrichment...")
@@ -465,67 +508,30 @@ def run_sharpe_calculation(ch_client) -> dict:
 
 
 def run_drift_monitoring(ch_client) -> dict:
-    """Run ML drift monitoring to detect feature distribution changes."""
+    """Run ML drift monitoring to detect feature distribution changes.
+
+    Enhanced with:
+    - Auto-create baseline if missing
+    - Adaptive sample sizing
+    - Auto-retraining triggers
+    - JSON report export for API access
+    """
     logger.info("Running drift monitoring...")
     start = time.time()
 
     try:
         from ml.monitoring.drift import DriftDetector
+        from ml.monitoring.auto_retrain import RetrainTrigger, get_last_train_date, get_new_trade_count_since
         from ml.features import FeatureExtractor
         from clickhouse_client import ClickHouseClient
         from pathlib import Path
-
-        baseline_path = "ml/checkpoints/drift_baseline.pkl"
-
-        # Check if baseline exists
-        if not Path(baseline_path).exists():
-            logger.warning(f"Drift baseline not found at {baseline_path}. Run training first.")
-            return {
-                'status': 'skipped',
-                'reason': 'no_baseline',
-                'elapsed_seconds': time.time() - start
-            }
-
-        # Load baseline
-        detector = DriftDetector.load_baseline(baseline_path)
-
-        # Extract recent trader features
-        aware_client = ClickHouseClient()
-        feature_extractor = FeatureExtractor(aware_client)
-
-        # Get recent traders for drift check (sample 5000)
-        result = aware_client.query("""
-            SELECT DISTINCT proxy_address
-            FROM polybot.aware_global_trades_dedup
-            WHERE ts >= now() - INTERVAL 7 DAY
-            ORDER BY rand()
-            LIMIT 5000
-        """)
-        addresses = [row[0] for row in result.result_rows]
-
-        if len(addresses) < 100:
-            logger.warning("Not enough recent traders for drift detection")
-            return {
-                'status': 'skipped',
-                'reason': 'insufficient_samples',
-                'sample_count': len(addresses),
-                'elapsed_seconds': time.time() - start
-            }
-
-        # Extract features
-        logger.info(f"Extracting features for {len(addresses)} traders...")
-        features_list = feature_extractor.extract_batch(addresses)
-
-        # Build feature matrix
+        import json as json_module
         import numpy as np
-        n_features = len(features_list[0].to_tabular_vector()) if features_list else 35
-        feature_matrix = np.zeros((len(addresses), n_features), dtype=np.float32)
 
-        for i, feat in enumerate(features_list):
-            if feat is not None:
-                feature_matrix[i] = feat.to_tabular_vector()
+        baseline_path = Path("ml/checkpoints/drift_baseline.pkl")
+        report_path = Path("ml/checkpoints/latest_drift_report.json")
 
-        # Get feature names
+        # Feature names for consistency
         feature_names = [
             'total_trades', 'win_rate', 'avg_trade_size', 'max_trade_size',
             'trade_frequency', 'avg_hold_hours', 'sharpe_ratio', 'sortino_ratio',
@@ -540,9 +546,115 @@ def run_drift_monitoring(ch_client) -> dict:
             'win_loss_ratio', 'risk_reward_ratio'
         ]
 
-        # Run detection
+        # Initialize ClickHouse client and feature extractor
+        aware_client = ClickHouseClient()
+        feature_extractor = FeatureExtractor(aware_client)
+
+        # Adaptive sample sizing: 10% of total or 5000-20000 range
+        total_result = aware_client.query("""
+            SELECT count(DISTINCT proxy_address)
+            FROM polybot.aware_global_trades_dedup
+            WHERE ts >= now() - INTERVAL 30 DAY
+        """)
+        total_traders = total_result.result_rows[0][0] if total_result.result_rows else 5000
+        sample_size = min(20000, max(5000, int(total_traders * 0.1)))
+
+        # Get recent traders for drift check
+        result = aware_client.query(f"""
+            SELECT DISTINCT proxy_address
+            FROM polybot.aware_global_trades_dedup
+            WHERE ts >= now() - INTERVAL 7 DAY
+            ORDER BY rand()
+            LIMIT {sample_size}
+        """)
+        addresses = [row[0] for row in result.result_rows]
+
+        if len(addresses) < 100:
+            logger.warning("Not enough recent traders for drift detection")
+            return {
+                'status': 'skipped',
+                'reason': 'insufficient_samples',
+                'sample_count': len(addresses),
+                'elapsed_seconds': time.time() - start
+            }
+
+        # Extract features
+        logger.info(f"Extracting features for {len(addresses)} traders (adaptive sample)...")
+        features_list = feature_extractor.extract_batch(addresses)
+
+        # Build feature matrix
+        n_features = len(features_list[0].to_tabular_vector()) if features_list else 35
+        feature_matrix = np.zeros((len(addresses), n_features), dtype=np.float32)
+
+        for i, feat in enumerate(features_list):
+            if feat is not None:
+                feature_matrix[i] = feat.to_tabular_vector()
+
+        # Auto-create baseline if missing
+        if not baseline_path.exists():
+            logger.warning("Drift baseline not found - creating from current data")
+            baseline_path.parent.mkdir(parents=True, exist_ok=True)
+
+            detector = DriftDetector()
+            detector.fit_baseline(feature_matrix, feature_names[:n_features])
+            detector.save_baseline(str(baseline_path))
+
+            logger.info(f"Created drift baseline with {len(addresses)} samples")
+            return {
+                'status': 'baseline_created',
+                'n_samples': len(addresses),
+                'n_features': n_features,
+                'elapsed_seconds': time.time() - start
+            }
+
+        # Load baseline and run detection
+        detector = DriftDetector.load_baseline(baseline_path)
         report = detector.detect(feature_matrix, feature_names[:n_features])
         detector.log_report(report)
+
+        # Save drift report to JSON for API access
+        drift_report_data = {
+            'checked_at': datetime.utcnow().isoformat(),
+            'alert_level': report.alert_level,
+            'drift_ratio': report.drift_ratio,
+            'n_features': report.n_features,
+            'n_drifted': report.n_drifted,
+            'n_samples_current': len(addresses),
+            'baseline_date': detector.baseline_date.isoformat() if hasattr(detector, 'baseline_date') else 'unknown',
+            'drifted_features': [
+                {
+                    'feature': r.feature_name,
+                    'severity': r.drift_severity,
+                    'ks_statistic': r.ks_statistic,
+                    'p_value': r.ks_pvalue
+                }
+                for r in report.feature_results if r.is_drifted
+            ]
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json_module.dumps(drift_report_data, indent=2))
+
+        # Check if retraining is needed
+        retrain_triggered = False
+        retrain_reason = ''
+
+        trigger = RetrainTrigger()
+        last_train = get_last_train_date()
+        new_trades = get_new_trade_count_since(last_train, aware_client) if last_train else 0
+
+        should_retrain, reason = trigger.should_retrain(
+            drift_ratio=report.drift_ratio,
+            last_train_date=last_train,
+            new_trade_count=new_trades
+        )
+
+        if should_retrain:
+            # Determine priority based on drift severity
+            priority = 'high' if report.alert_level == 'critical' else 'normal'
+            trigger_result = trigger.trigger_retrain(reason, priority=priority)
+            retrain_triggered = trigger_result.get('status') in ('queued', 'already_queued')
+            retrain_reason = reason
+            logger.info(f"Retraining triggered: {reason}")
 
         elapsed = time.time() - start
         logger.info(f"Drift monitoring complete in {elapsed:.1f}s - Alert: {report.alert_level}")
@@ -554,6 +666,8 @@ def run_drift_monitoring(ch_client) -> dict:
             'n_features': report.n_features,
             'alert_level': report.alert_level,
             'sample_count': len(addresses),
+            'retrain_triggered': retrain_triggered,
+            'retrain_reason': retrain_reason,
             'elapsed_seconds': elapsed
         }
 
@@ -620,7 +734,7 @@ def run_notification_dispatch(ch_client) -> dict:
         dispatcher = get_dispatcher()
 
         # Check if any channels are configured
-        if not dispatcher.channels:
+        if not dispatcher.has_channels:
             logger.info("No notification channels configured (set DISCORD_WEBHOOK_URL or TELEGRAM_BOT_TOKEN)")
             return {
                 'status': 'skipped',
@@ -643,7 +757,7 @@ def run_notification_dispatch(ch_client) -> dict:
         return {
             'status': 'success',
             'alerts_dispatched': alerts_sent,
-            'channels': list(dispatcher.channels.keys()),
+            'channels': dispatcher.active_channels,
             'elapsed_seconds': elapsed
         }
 
@@ -710,6 +824,9 @@ def run_all_jobs(ch_client) -> dict:
 
     # 7. Anomaly Detection (rule-based)
     results['anomaly_detection'] = run_anomaly_detection(ch_client)
+
+    # 7b. Insider Detection (pattern-based alert generation)
+    results['insider_detection'] = run_insider_detection(ch_client)
 
     # 8. ML Enrichment (Strategy DNA clustering + ML-based anomaly detection)
     results['ml_enrichment'] = run_ml_enrichment(ch_client)

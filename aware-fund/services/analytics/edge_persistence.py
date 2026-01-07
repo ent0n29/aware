@@ -229,11 +229,10 @@ class EdgePersistencePredictor:
     def _get_eligible_traders(self) -> list[str]:
         """Get traders eligible for prediction"""
         query = f"""
-        SELECT DISTINCT username
+        SELECT DISTINCT proxy_address
         FROM polybot.aware_global_trades
         WHERE ts >= now() - INTERVAL 90 DAY
-          AND username != ''
-        GROUP BY username
+        GROUP BY proxy_address
         HAVING count() >= {self.config.min_trades}
         LIMIT 2000
         """

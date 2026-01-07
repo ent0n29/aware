@@ -128,3 +128,6 @@ test-output/
 coverage/
 .coverage
 htmlcov/
+
+# Persistent data (local dev)
+/data/

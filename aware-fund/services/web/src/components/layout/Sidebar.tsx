@@ -7,7 +7,6 @@ import { cn } from '@/lib/utils'
 import {
   LayoutDashboard,
   Trophy,
-  LineChart,
   Users,
   Sparkles,
   Settings,
@@ -28,7 +27,6 @@ const navigation = [
   { name: 'All Funds', href: '/funds', icon: Layers },
   { name: 'Invest', href: '/invest', icon: Wallet },
   { name: 'Leaderboard', href: '/leaderboard', icon: Trophy },
-  { name: 'PSI Indices', href: '/indices', icon: LineChart },
   { name: 'Consensus', href: '/consensus', icon: Users },
   { name: 'Discovery', href: '/discovery', icon: Sparkles },
   { name: 'Alerts', href: '/insider-alerts', icon: AlertTriangle },

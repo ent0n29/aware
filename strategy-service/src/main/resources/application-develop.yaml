@@ -93,10 +93,11 @@ hft:
       complete-set-hedge-delay-max-seconds: 60        # (Not used when disabled)
 
       # Taker mode - cross the spread when edge is favorable
+      # DISCOVERY: Gab is 100% TAKER (all BUY orders hitting the ASK)
       taker-mode-enabled: true
-      taker-mode-max-edge: 0.015                      # Max edge to take (1.5 cents)
-      taker-mode-max-spread: 0.02                     # Max spread to cross (2 cents)
-      taker-mode-probability: 0.20                    # RECALIBRATED: Increased from 0.10 to 0.20 to match gab's taker behavior
+      taker-mode-max-edge: 0.03                       # AGGRESSIVE: Increased from 0.015 to 3 cents
+      taker-mode-max-spread: 0.06                     # AGGRESSIVE: Increased from 0.02 to 6 cents (match observed spreads)
+      taker-mode-probability: 0.80                    # AGGRESSIVE: Increased from 0.20 to 0.80 to match gab's 100% taker behavior
 
   # =============================================================================
   # Multi-Fund Mode Configuration (Alpha Funds)

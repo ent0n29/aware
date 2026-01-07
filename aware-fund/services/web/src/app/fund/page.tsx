@@ -18,8 +18,42 @@ import {
   ChevronDown,
   Zap,
 } from 'lucide-react'
-import { cn, formatCurrency, formatNumber } from '@/lib/utils'
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts'
+import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils'
 import { NAVChart } from '@/components/fund/NAVChart'
+
+// Mock chart data for fund comparison (will be replaced with real data)
+const mockComparisonData = [
+  { date: 'Nov 1', 'PSI-10': 100, 'PSI-25': 100, 'PSI-CRYPTO': 100, 'ALPHA-ARB': 100 },
+  { date: 'Nov 8', 'PSI-10': 102, 'PSI-25': 101, 'PSI-CRYPTO': 104, 'ALPHA-ARB': 101 },
+  { date: 'Nov 15', 'PSI-10': 105, 'PSI-25': 103, 'PSI-CRYPTO': 108, 'ALPHA-ARB': 102 },
+  { date: 'Nov 22', 'PSI-10': 108, 'PSI-25': 105, 'PSI-CRYPTO': 112, 'ALPHA-ARB': 103 },
+  { date: 'Nov 29', 'PSI-10': 110, 'PSI-25': 107, 'PSI-CRYPTO': 115, 'ALPHA-ARB': 104 },
+  { date: 'Dec 6', 'PSI-10': 112, 'PSI-25': 108, 'PSI-CRYPTO': 118, 'ALPHA-ARB': 105 },
+  { date: 'Dec 13', 'PSI-10': 115, 'PSI-25': 110, 'PSI-CRYPTO': 120, 'ALPHA-ARB': 106 },
+  { date: 'Dec 20', 'PSI-10': 118, 'PSI-25': 112, 'PSI-CRYPTO': 122, 'ALPHA-ARB': 107 },
+  { date: 'Dec 27', 'PSI-10': 120, 'PSI-25': 114, 'PSI-CRYPTO': 125, 'ALPHA-ARB': 108 },
+]
+
+// Fund colors for chart
+const fundColors: Record<string, string> = {
+  'PSI-10': '#0ea5e9',
+  'PSI-25': '#06b6d4',
+  'PSI-CRYPTO': '#8b5cf6',
+  'PSI-POLITICS': '#f59e0b',
+  'PSI-SPORTS': '#22c55e',
+  'ALPHA-ARB': '#ec4899',
+  'ALPHA-INSIDER': '#f97316',
+  'ALPHA-EDGE': '#14b8a6',
+}
 
 // Types
 interface FundOverview {
@@ -78,6 +112,7 @@ export default function FundPage() {
   const [constituents, setConstituents] = useState<IndexConstituent[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [comparisonTimeframe, setComparisonTimeframe] = useState('1M')
 
   // Get current fund config
   const currentFund = fundTypes.find(f => f.id === selectedFund) || fundTypes[0]
@@ -327,6 +362,108 @@ export default function FundPage() {
               NAV History
             </h3>
             <NAVChart fundId={selectedFund} height={300} />
+          </div>
+
+          {/* Quick Fund Switcher Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {fundTypes.slice(0, 4).filter(f => f.id !== selectedFund).map((fund) => (
+              <button
+                key={fund.id}
+                onClick={() => setSelectedFund(fund.id)}
+                className={cn(
+                  'rounded-xl bg-slate-900/50 border p-4 text-left transition-all hover:shadow-lg',
+                  'border-slate-800 hover:border-slate-600'
+                )}
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{ backgroundColor: fundColors[fund.id] || '#64748b' }}
+                  />
+                  <span className="font-medium text-white text-sm">{fund.name}</span>
+                </div>
+                <p className="text-xs text-slate-500 line-clamp-1">{fund.description}</p>
+                <div className="mt-2 flex items-center justify-between">
+                  <span className={cn(
+                    'text-xs px-1.5 py-0.5 rounded',
+                    fund.type === 'MIRROR' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+                  )}>
+                    {fund.type}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Fund Performance Comparison Chart */}
+          <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-semibold text-white">Fund Performance Comparison</h3>
+              <div className="flex gap-1 p-1 bg-slate-800/50 rounded-lg">
+                {['1W', '1M', '3M', 'ALL'].map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setComparisonTimeframe(tf)}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+                      comparisonTimeframe === tf
+                        ? 'bg-aware-500 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    )}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={mockComparisonData}>
+                  <defs>
+                    {Object.entries(fundColors).map(([fundId, color]) => (
+                      <linearGradient key={fundId} id={`color-${fundId}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={color} stopOpacity={0.2} />
+                        <stop offset="95%" stopColor={color} stopOpacity={0} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <XAxis
+                    dataKey="date"
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: '#64748b', fontSize: 12 }}
+                  />
+                  <YAxis
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: '#64748b', fontSize: 12 }}
+                    domain={[95, 130]}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#1e293b',
+                      border: '1px solid #334155',
+                      borderRadius: '8px'
+                    }}
+                  />
+                  <Legend />
+                  {['PSI-10', 'PSI-25', 'PSI-CRYPTO', 'ALPHA-ARB'].map((fundId) => (
+                    <Area
+                      key={fundId}
+                      type="monotone"
+                      dataKey={fundId}
+                      stroke={fundColors[fundId]}
+                      strokeWidth={selectedFund === fundId ? 3 : 1.5}
+                      fill={`url(#color-${fundId})`}
+                      opacity={selectedFund === fundId ? 1 : 0.5}
+                    />
+                  ))}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-xs text-slate-500 mt-3 text-center">
+              Normalized performance (base = 100). Real data will populate as trades execute.
+            </p>
           </div>
 
           {/* Stats Grid */}

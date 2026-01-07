@@ -7,9 +7,12 @@ Handles:
 - Training ensemble fusion layers
 - Validation and early stopping
 - Checkpointing
+- Feature importance export
 """
 
+import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 import numpy as np
@@ -47,6 +50,14 @@ class AWARETrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
 
+        # Metrics tracking for explainability
+        self.n_traders = 0
+        self.n_trades = 0
+        self.best_tier_accuracy = 0.0
+        self.best_sharpe_mae = float('inf')
+        self.training_started_at: Optional[datetime] = None
+        self.feature_names: Optional[list] = None
+
     def train(
         self,
         train_loader: DataLoader,
@@ -68,6 +79,7 @@ class AWARETrainer:
         logger.info("AWARE ML Training Pipeline")
         logger.info("=" * 60)
 
+        self.training_started_at = datetime.utcnow()
         metrics = {}
 
         # Stage 1: Train tabular model
@@ -75,7 +87,12 @@ class AWARETrainer:
         logger.info("-" * 40)
         tabular_metrics = self._train_tabular(train_loader, val_loader)
         metrics['tabular'] = tabular_metrics
+        self.best_tier_accuracy = tabular_metrics.get('val_accuracy', 0)
+        self.best_sharpe_mae = tabular_metrics.get('val_sharpe_mae', float('inf'))
         logger.info(f"Tabular training complete: accuracy={tabular_metrics.get('val_accuracy', 0):.3f}")
+
+        # Export feature importance after tabular training
+        self._export_feature_importance()
 
         # Stage 2: Train sequence model
         logger.info("\nStage 2: Training Sequence Model (LSTM)")
@@ -100,8 +117,9 @@ class AWARETrainer:
             logger.info(f"Test accuracy: {test_metrics.get('accuracy', 0):.3f}")
             logger.info(f"Test Sharpe MAE: {test_metrics.get('sharpe_mae', 0):.3f}")
 
-        # Save final model
+        # Save final model and metadata
         self._save_checkpoint()
+        self._save_training_metadata(metrics)
 
         logger.info("\n" + "=" * 60)
         logger.info("Training Complete!")
@@ -135,6 +153,9 @@ class AWARETrainer:
         X_val = np.concatenate(X_val)
         y_tier_val = np.concatenate(y_tier_val)
         y_sharpe_val = np.concatenate(y_sharpe_val)
+
+        # Track training stats
+        self.n_traders = len(X_train) + len(X_val)
 
         # Store training features for drift baseline
         self._train_features = X_train
@@ -441,19 +462,7 @@ class AWARETrainer:
                 from ..monitoring.drift import DriftDetector
 
                 detector = DriftDetector()
-                feature_names = [
-                    'total_trades', 'win_rate', 'avg_trade_size', 'max_trade_size',
-                    'trade_frequency', 'avg_hold_hours', 'sharpe_ratio', 'sortino_ratio',
-                    'max_drawdown', 'profit_factor', 'avg_pnl', 'total_pnl',
-                    'unique_markets', 'market_concentration', 'active_days',
-                    'trades_per_day', 'morning_ratio', 'evening_ratio',
-                    'crypto_ratio', 'politics_ratio', 'sports_ratio',
-                    'avg_entry_odds', 'avg_exit_odds', 'maker_ratio',
-                    'price_improvement', 'execution_quality', 'slippage_avg',
-                    'streak_current', 'streak_max_win', 'streak_max_loss',
-                    'consecutive_wins', 'consecutive_losses', 'recovery_speed',
-                    'win_loss_ratio', 'risk_reward_ratio'
-                ]
+                feature_names = self._get_feature_names()
 
                 n_features = self._train_features.shape[1]
                 detector.fit_baseline(self._train_features, feature_names[:n_features])
@@ -464,3 +473,111 @@ class AWARETrainer:
 
             except Exception as e:
                 logger.warning(f"Failed to save drift baseline: {e}")
+
+    def _get_feature_names(self) -> list:
+        """Get the list of feature names used in training."""
+        return [
+            'total_trades', 'win_rate', 'avg_trade_size', 'max_trade_size',
+            'trade_frequency', 'avg_hold_hours', 'sharpe_ratio', 'sortino_ratio',
+            'max_drawdown', 'profit_factor', 'avg_pnl', 'total_pnl',
+            'unique_markets', 'market_concentration', 'active_days',
+            'trades_per_day', 'morning_ratio', 'evening_ratio',
+            'crypto_ratio', 'politics_ratio', 'sports_ratio',
+            'avg_entry_odds', 'avg_exit_odds', 'maker_ratio',
+            'price_improvement', 'execution_quality', 'slippage_avg',
+            'streak_current', 'streak_max_win', 'streak_max_loss',
+            'consecutive_wins', 'consecutive_losses', 'recovery_speed',
+            'win_loss_ratio', 'risk_reward_ratio'
+        ]
+
+    def _export_feature_importance(self) -> None:
+        """Export XGBoost feature importance to JSON file."""
+        if self.tabular_scorer is None:
+            return
+
+        try:
+            importance = self.tabular_scorer.get_feature_importance()
+            if not importance:
+                logger.warning("No feature importance available")
+                return
+
+            checkpoint_dir = self.config.get_checkpoint_path().parent
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            # Sort by importance
+            sorted_importance = dict(
+                sorted(importance.items(), key=lambda x: x[1], reverse=True)
+            )
+
+            export_data = {
+                'importance_type': 'weight',
+                'model_version': self.config.model_version,
+                'n_features': len(sorted_importance),
+                'generated_at': datetime.utcnow().isoformat(),
+                'features': {
+                    name: float(score) for name, score in sorted_importance.items()
+                },
+                'top_10': list(sorted_importance.keys())[:10]
+            }
+
+            importance_path = checkpoint_dir / 'feature_importance.json'
+            with open(importance_path, 'w') as f:
+                json.dump(export_data, f, indent=2)
+
+            logger.info(f"Exported feature importance to {importance_path}")
+            logger.info(f"Top 5 features: {list(sorted_importance.keys())[:5]}")
+
+        except Exception as e:
+            logger.warning(f"Failed to export feature importance: {e}")
+
+    def _save_training_metadata(self, metrics: Dict) -> None:
+        """Save training run metadata for tracking and reproducibility."""
+        if self.training_started_at is None:
+            return
+
+        try:
+            checkpoint_dir = self.config.get_checkpoint_path().parent
+            completed_at = datetime.utcnow()
+            duration = (completed_at - self.training_started_at).total_seconds()
+
+            metadata = {
+                'model_version': self.config.model_version,
+                'started_at': self.training_started_at.isoformat(),
+                'completed_at': completed_at.isoformat(),
+                'duration_seconds': int(duration),
+                'status': 'success',
+                'n_traders': self.n_traders,
+                'final_metrics': {
+                    'tier_accuracy': float(self.best_tier_accuracy),
+                    'sharpe_mae': float(self.best_sharpe_mae) if self.best_sharpe_mae != float('inf') else None,
+                    'val_loss': float(self.best_val_loss) if self.best_val_loss != float('inf') else None,
+                },
+                'hyperparameters': {
+                    'learning_rate': self.config.learning_rate,
+                    'batch_size': self.config.batch_size,
+                    'num_epochs': self.config.num_epochs,
+                    'seq_hidden_dim': self.config.seq_hidden_dim,
+                    'seq_embedding_dim': self.config.seq_embedding_dim,
+                    'seq_num_layers': self.config.seq_num_layers,
+                    'xgb_n_estimators': self.config.xgb_n_estimators,
+                    'xgb_max_depth': self.config.xgb_max_depth,
+                    'xgb_learning_rate': self.config.xgb_learning_rate,
+                    'ensemble_hidden_dim': self.config.ensemble_hidden_dim,
+                    'early_stopping_patience': self.config.early_stopping_patience,
+                },
+                'metrics_by_stage': {
+                    'tabular': metrics.get('tabular', {}),
+                    'sequence': metrics.get('sequence', {}),
+                    'ensemble': metrics.get('ensemble', {}),
+                    'test': metrics.get('test', {}),
+                }
+            }
+
+            metadata_path = checkpoint_dir / 'training_metadata.json'
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            logger.info(f"Saved training metadata to {metadata_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to save training metadata: {e}")

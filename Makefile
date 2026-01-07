@@ -26,33 +26,42 @@ help: ## Show this help
 	@echo ''
 	@echo '${GREEN}AWARE Fund${RESET} - The Vanguard of Prediction Markets'
 	@echo ''
-	@echo '${YELLOW}Local Development:${RESET}'
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E 'local|up|down|build|logs|status|clean' | awk 'BEGIN {FS = ":.*?## "}; {printf "  ${BLUE}%-15s${RESET} %s\n", $$1, $$2}'
+	@echo '${YELLOW}Quick Start:${RESET}'
+	@echo '  ${BLUE}make build${RESET}       Rebuild Docker images (after code changes)'
+	@echo '  ${BLUE}make local${RESET}       Start everything (services + analytics)'
+	@echo '  ${BLUE}make down${RESET}        Stop everything'
 	@echo ''
-	@echo '${YELLOW}Server Deployment:${RESET}'
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E 'deploy|server' | awk 'BEGIN {FS = ":.*?## "}; {printf "  ${BLUE}%-15s${RESET} %s\n", $$1, $$2}'
+	@echo '${YELLOW}ML Training:${RESET}'
+	@echo '  ${BLUE}make train${RESET}       Quick (10K traders, ~8 min)'
+	@echo '  ${BLUE}make train-all${RESET}   All eligible traders (currently ~4K)'
 	@echo ''
-	@echo '${YELLOW}Development:${RESET}'
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E 'test|lint|java|python' | awk 'BEGIN {FS = ":.*?## "}; {printf "  ${BLUE}%-15s${RESET} %s\n", $$1, $$2}'
+	@echo '${YELLOW}Other:${RESET}'
+	@echo '  ${BLUE}make analytics${RESET}   Run analytics only'
+	@echo '  ${BLUE}make logs${RESET}        View logs'
+	@echo '  ${BLUE}make status${RESET}      Health check'
 	@echo ''
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOCAL DEVELOPMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-local: docker-check ## Start full local stack (all services)
+local: docker-check ## Start everything + run analytics (one command!)
 	@echo '${GREEN}Starting AWARE Fund local stack...${RESET}'
 	docker compose -f docker-compose.local.yaml up -d
 	@echo ''
-	@echo '${GREEN}Services starting. Access:${RESET}'
+	@echo '${YELLOW}Waiting for services to be ready...${RESET}'
+	@sleep 10
+	@echo '${GREEN}Running analytics pipeline...${RESET}'
+	@docker exec aware-analytics python3 run_all.py 2>&1 | grep -E "(INFO|WARNING|Complete)" | tail -20 || true
+	@echo ''
+	@echo '${GREEN}✓ AWARE Fund ready!${RESET}'
+	@echo ''
 	@echo '  Web Dashboard:     http://localhost:3000'
 	@echo '  Python API:        http://localhost:8000'
 	@echo '  Strategy Service:  http://localhost:8081'
-	@echo '  Executor Service:  http://localhost:8080'
 	@echo '  ClickHouse:        http://localhost:8123'
 	@echo ''
-	@echo 'Run ${BLUE}make logs${RESET} to view logs'
-	@echo 'Run ${BLUE}make status${RESET} to check health'
+	@echo 'Commands: ${BLUE}make train${RESET} (retrain ML) | ${BLUE}make logs${RESET} | ${BLUE}make down${RESET}'
 
 up: local ## Alias for 'make local'
 
@@ -141,11 +150,41 @@ python-setup: ## Setup Python virtual environments
 	cd aware-fund/services/analytics && python -m venv .venv && .venv/bin/pip install -r requirements.txt
 	cd aware-fund/services/api && python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-python-analytics: ## Run analytics jobs (requires infra)
+python-analytics: ## Run analytics jobs ONCE (requires infra)
 	cd aware-fund/services/analytics && source .venv/bin/activate && CLICKHOUSE_HOST=localhost python run_all.py
+
+python-analytics-continuous: ## Run ML analytics continuously (hourly updates)
+	@echo '${GREEN}Starting ML analytics pipeline (continuous mode)...${RESET}'
+	cd aware-fund/services/analytics && source .venv/bin/activate && CLICKHOUSE_HOST=localhost python run_all.py --continuous --interval 3600
 
 python-api: ## Start Python API (requires infra)
 	cd aware-fund/services/api && source .venv/bin/activate && CLICKHOUSE_HOST=localhost uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ML PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+train: ## Retrain ML models (quick: 10K traders, ~8 min)
+	@echo '${GREEN}Retraining ML models (quick mode)...${RESET}'
+	@echo 'Training on 10K traders, 50 epochs (~8 min)'
+	@docker exec aware-analytics python3 -m ml.training.train --max-traders 10000 --epochs 50
+	@echo ''
+	@echo '${GREEN}Running analytics with new model...${RESET}'
+	@docker exec aware-analytics python3 run_all.py 2>&1 | grep -E "(INFO|Complete)" | tail -10
+	@echo '${GREEN}✓ Training complete! Refresh UI to see changes.${RESET}'
+
+train-all: ## Retrain on ALL eligible traders (no limit)
+	@echo '${GREEN}Retraining ML models on ALL data...${RESET}'
+	@echo 'Training on all eligible traders, 100 epochs'
+	@docker exec aware-analytics python3 -m ml.training.train --max-traders 999999 --epochs 100
+	@echo ''
+	@echo '${GREEN}Running analytics with new model...${RESET}'
+	@docker exec aware-analytics python3 run_all.py 2>&1 | grep -E "(INFO|Complete)" | tail -10
+	@echo '${GREEN}✓ Training complete! Refresh UI to see changes.${RESET}'
+
+analytics: ## Run analytics pipeline only (no training)
+	@echo '${GREEN}Running analytics...${RESET}'
+	@docker exec aware-analytics python3 run_all.py 2>&1 | grep -E "(INFO|WARNING|Complete)" | tail -20
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WEB DASHBOARD

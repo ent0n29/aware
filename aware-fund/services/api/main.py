@@ -116,6 +116,8 @@ class LeaderboardEntry(BaseModel):
     strategy_confidence: float
     rank_change: int
     total_trades: int = 0
+    model_version: Optional[str] = None
+    tier_confidence: Optional[float] = None
 
 
 class TraderProfile(BaseModel):
@@ -628,7 +630,9 @@ async def get_leaderboard(
                 strategy_type,
                 strategy_confidence,
                 0 AS rank_change,
-                coalesce(p.total_trades, 0) AS total_trades
+                coalesce(p.total_trades, 0) AS total_trades,
+                lb.model_version,
+                lb.tier_confidence
             FROM aware_leaderboard_ml AS lb
             LEFT JOIN (SELECT proxy_address, total_trades FROM aware_trader_profiles FINAL) AS p
                 ON lb.proxy_address = p.proxy_address
@@ -655,7 +659,9 @@ async def get_leaderboard(
                 strategy_type=row[10] or 'UNKNOWN',
                 strategy_confidence=row[11] or 0,
                 rank_change=row[12] or 0,
-                total_trades=row[13] or 0
+                total_trades=row[13] or 0,
+                model_version=row[14] if len(row) > 14 else None,
+                tier_confidence=row[15] if len(row) > 15 else None
             ))
 
         return entries
@@ -2749,6 +2755,416 @@ async def get_fund_nav_history(
 
     except Exception as e:
         logger.error(f"Failed to get NAV history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ML MODEL ENDPOINTS
+# ============================================================================
+
+
+class TraderEnrichmentFull(BaseModel):
+    """Extended trader enrichment with ML scores."""
+    proxy_address: str
+    username: str
+    # ML Enrichment
+    cluster_id: int
+    strategy_cluster: str
+    cluster_description: str
+    is_anomaly: bool
+    anomaly_score: float
+    anomaly_type: str
+    # ML Scores
+    ml_score: float
+    ml_tier: str
+    tier_confidence: float
+    predicted_sharpe: float
+    sharpe_lower: Optional[float] = None
+    sharpe_upper: Optional[float] = None
+    # Profile
+    total_volume: float
+    total_pnl: float
+    updated_at: Optional[datetime] = None
+
+
+class FeatureImportance(BaseModel):
+    """Feature importance entry."""
+    name: str
+    importance: float
+    rank: int
+
+
+class TierBoundary(BaseModel):
+    """Tier boundary definition."""
+    tier: str
+    min_score: float
+    max_score: float
+    description: str
+
+
+class ModelInfo(BaseModel):
+    """ML model metadata."""
+    model_version: str
+    trained_at: Optional[datetime] = None
+    n_traders_trained: int
+    tier_accuracy: float
+    sharpe_mae: float
+    top_features: list[dict]
+    tier_boundaries: list[dict]
+
+
+class DriftedFeature(BaseModel):
+    """Drifted feature info."""
+    name: str
+    severity: str
+    ks_stat: float
+
+
+class DriftStatus(BaseModel):
+    """Current drift monitoring status."""
+    status: str
+    drift_ratio: float
+    n_drifted_features: int
+    n_total_features: int
+    drifted_features: list[dict]
+    last_checked: Optional[datetime] = None
+    baseline_date: Optional[str] = None
+    retrain_recommended: bool
+
+
+@app.get("/api/traders/{address}/enrichment", response_model=TraderEnrichmentFull)
+@limiter.limit("60/minute")
+async def get_trader_enrichment_full(request: Request, address: str):
+    """
+    Get complete ML enrichment for a trader.
+
+    Includes clustering, anomaly detection, and ML scores.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query("""
+            SELECT
+                ml.proxy_address, ml.username,
+                ml.cluster_id, ml.strategy_cluster, ml.cluster_description,
+                ml.is_anomaly, ml.anomaly_score, ml.anomaly_type,
+                s.ml_score, s.ml_tier, s.tier_confidence,
+                s.predicted_sharpe_30d,
+                p.total_volume_usd, p.total_pnl,
+                ml.updated_at
+            FROM (SELECT * FROM polybot.aware_ml_enrichment FINAL) AS ml
+            LEFT JOIN (SELECT * FROM polybot.aware_ml_scores FINAL) AS s
+                ON ml.proxy_address = s.proxy_address
+            LEFT JOIN (SELECT * FROM polybot.aware_trader_profiles FINAL) AS p
+                ON ml.proxy_address = p.proxy_address
+            WHERE lower(ml.proxy_address) = lower(%(addr)s)
+               OR lower(ml.username) = lower(%(addr)s)
+            LIMIT 1
+        """, parameters={'addr': address})
+
+        if not result.result_rows:
+            raise HTTPException(404, "Trader enrichment not found")
+
+        row = result.result_rows[0]
+        return TraderEnrichmentFull(
+            proxy_address=row[0],
+            username=row[1] or '',
+            cluster_id=int(row[2]) if row[2] is not None else 0,
+            strategy_cluster=row[3] or 'UNKNOWN',
+            cluster_description=row[4] or '',
+            is_anomaly=bool(row[5]) if row[5] is not None else False,
+            anomaly_score=float(row[6]) if row[6] else 0.0,
+            anomaly_type=row[7] or '',
+            ml_score=float(row[8]) if row[8] else 0.0,
+            ml_tier=row[9] or 'UNKNOWN',
+            tier_confidence=float(row[10]) if row[10] else 0.0,
+            predicted_sharpe=float(row[11]) if row[11] else 0.0,
+            total_volume=float(row[12]) if row[12] else 0.0,
+            total_pnl=float(row[13]) if row[13] else 0.0,
+            updated_at=row[14]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get trader enrichment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/models/ensemble/info", response_model=ModelInfo)
+@limiter.limit("30/minute")
+async def get_model_info(request: Request):
+    """
+    Get current ML model metadata and feature importance.
+
+    Returns model version, training date, accuracy metrics, and top features.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        # Get latest training run
+        training_result = client.query("""
+            SELECT model_version, completed_at, n_traders,
+                   tier_accuracy, sharpe_mae
+            FROM polybot.aware_ml_training_runs
+            WHERE status = 'success'
+            ORDER BY completed_at DESC
+            LIMIT 1
+        """)
+
+        # Get feature importance
+        importance_result = client.query("""
+            SELECT feature_name, importance_score, importance_rank
+            FROM polybot.aware_ml_feature_importance FINAL
+            ORDER BY importance_rank
+            LIMIT 15
+        """)
+
+        # Get tier boundaries
+        tier_result = client.query("""
+            SELECT tier_name, score_min, score_max, description
+            FROM polybot.aware_ml_tier_boundaries FINAL
+            ORDER BY score_min
+        """)
+
+        training = training_result.result_rows[0] if training_result.result_rows else None
+
+        return ModelInfo(
+            model_version=training[0] if training else 'unknown',
+            trained_at=training[1] if training else None,
+            n_traders_trained=int(training[2]) if training and training[2] else 0,
+            tier_accuracy=float(training[3]) if training and training[3] else 0.0,
+            sharpe_mae=float(training[4]) if training and training[4] else 0.0,
+            top_features=[
+                {'name': r[0], 'importance': float(r[1]), 'rank': int(r[2])}
+                for r in importance_result.result_rows
+            ],
+            tier_boundaries=[
+                {'tier': r[0], 'min': float(r[1]), 'max': float(r[2]), 'desc': r[3]}
+                for r in tier_result.result_rows
+            ]
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get model info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/models/drift-status", response_model=DriftStatus)
+@limiter.limit("30/minute")
+async def get_drift_status(request: Request):
+    """
+    Get current drift monitoring status.
+
+    Shows if model features are drifting from training distribution
+    and whether retraining is recommended.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        # Load latest drift report from file
+        # Check multiple locations (Docker mount vs local dev)
+        possible_paths = [
+            Path("/app/ml/checkpoints/latest_drift_report.json"),  # Docker
+            Path(__file__).parent.parent / "analytics" / "ml" / "checkpoints" / "latest_drift_report.json",  # Local dev
+            Path("ml/checkpoints/latest_drift_report.json"),  # Relative
+        ]
+        drift_path = None
+        for p in possible_paths:
+            if p.exists():
+                drift_path = p
+                break
+
+        if drift_path is None:
+            return DriftStatus(
+                status='unknown',
+                drift_ratio=0.0,
+                n_drifted_features=0,
+                n_total_features=35,
+                drifted_features=[],
+                last_checked=None,
+                baseline_date=None,
+                retrain_recommended=False
+            )
+
+        with open(drift_path) as f:
+            report = json.load(f)
+
+        return DriftStatus(
+            status=report.get('alert_level', 'unknown'),
+            drift_ratio=report.get('drift_ratio', 0.0),
+            n_drifted_features=report.get('n_drifted', 0),
+            n_total_features=report.get('n_features', 35),
+            drifted_features=[
+                {'name': f['feature'], 'severity': f['severity'], 'ks_stat': f['ks_statistic']}
+                for f in report.get('drifted_features', [])
+            ],
+            last_checked=datetime.fromisoformat(report['checked_at']) if 'checked_at' in report else None,
+            baseline_date=report.get('baseline_date'),
+            retrain_recommended=report.get('drift_ratio', 0) >= 0.3
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get drift status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/models/training-history")
+@limiter.limit("30/minute")
+async def get_training_history(
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=50)
+):
+    """
+    Get recent model training runs.
+
+    Shows history of training runs with metrics and status.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query(f"""
+            SELECT
+                toString(run_id) as run_id,
+                model_version,
+                started_at,
+                completed_at,
+                duration_seconds,
+                status,
+                n_traders,
+                tier_accuracy,
+                sharpe_mae,
+                trigger_reason
+            FROM polybot.aware_ml_training_runs
+            ORDER BY started_at DESC
+            LIMIT {limit}
+        """)
+
+        return {
+            'count': len(result.result_rows),
+            'runs': [
+                {
+                    'run_id': row[0],
+                    'model_version': row[1],
+                    'started_at': row[2].isoformat() if row[2] else None,
+                    'completed_at': row[3].isoformat() if row[3] else None,
+                    'duration_seconds': int(row[4]) if row[4] else 0,
+                    'status': row[5],
+                    'n_traders': int(row[6]) if row[6] else 0,
+                    'tier_accuracy': float(row[7]) if row[7] else 0.0,
+                    'sharpe_mae': float(row[8]) if row[8] else 0.0,
+                    'trigger_reason': row[9]
+                }
+                for row in result.result_rows
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get training history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/models/feature-importance")
+@limiter.limit("30/minute")
+async def get_feature_importance(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=50),
+    importance_type: str = Query(default="weight")
+):
+    """
+    Get feature importance rankings from the ML model.
+
+    Returns top features ranked by importance score.
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query(f"""
+            SELECT
+                feature_name,
+                importance_score,
+                importance_rank,
+                model_version,
+                importance_type
+            FROM polybot.aware_ml_feature_importance FINAL
+            WHERE importance_type = %(imp_type)s
+            ORDER BY importance_rank
+            LIMIT {limit}
+        """, parameters={'imp_type': importance_type})
+
+        return {
+            'importance_type': importance_type,
+            'count': len(result.result_rows),
+            'features': [
+                {
+                    'rank': int(row[2]),
+                    'name': row[0],
+                    'importance': float(row[1]),
+                    'model_version': row[3]
+                }
+                for row in result.result_rows
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get feature importance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ml/tier-distribution")
+@limiter.limit("60/minute")
+async def get_tier_distribution(request: Request):
+    """
+    Get distribution of traders across ML tiers.
+
+    Shows how many traders are in each tier (BRONZE, SILVER, GOLD, DIAMOND).
+    """
+    try:
+        client = get_clickhouse_client()
+
+        result = client.query("""
+            SELECT
+                ml_tier,
+                count() as trader_count,
+                avg(ml_score) as avg_score,
+                avg(predicted_sharpe_30d) as avg_sharpe
+            FROM polybot.aware_ml_scores FINAL
+            WHERE ml_tier != ''
+            GROUP BY ml_tier
+            ORDER BY
+                CASE ml_tier
+                    WHEN 'DIAMOND' THEN 1
+                    WHEN 'GOLD' THEN 2
+                    WHEN 'SILVER' THEN 3
+                    WHEN 'BRONZE' THEN 4
+                    ELSE 5
+                END
+        """)
+
+        tiers = []
+        total = 0
+        for row in result.result_rows:
+            count = int(row[1])
+            total += count
+            tiers.append({
+                'tier': row[0],
+                'count': count,
+                'avg_score': round(float(row[2]) if row[2] else 0, 2),
+                'avg_sharpe': round(float(row[3]) if row[3] else 0, 3)
+            })
+
+        # Add percentages
+        for tier in tiers:
+            tier['percentage'] = round(tier['count'] / total * 100, 1) if total > 0 else 0
+
+        return {
+            'total_traders': total,
+            'tiers': tiers
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get tier distribution: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

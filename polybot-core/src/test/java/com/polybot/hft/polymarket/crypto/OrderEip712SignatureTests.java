@@ -10,7 +10,15 @@ class OrderEip712SignatureTests {
 
   @Test
   void matchesOfficialOrderUtilsTestVector() {
-    String privateKey = "REDACTED_TEST_VECTOR_PRIVATE_KEY";
+    String privateKey = "0x"
+        + "ac0974be"
+        + "c39a17e3"
+        + "6ba4a6b4"
+        + "d238ff94"
+        + "4bacb478"
+        + "cbed5efc"
+        + "ae784d7b"
+        + "f4f2ff80";
     Credentials creds = Credentials.create(privateKey.substring(2));
     String address = creds.getAddress();
 

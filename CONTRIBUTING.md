@@ -6,7 +6,7 @@ Internal development guidelines for the AWARE repository.
 
 ```bash
 # Prerequisites
-- Java 21+
+- Amazon Corretto 21 (recommended) or Java 21+
 - Maven 3.8+
 - Python 3.11+
 - Docker & Docker Compose

@@ -12,7 +12,7 @@ This repository contains two integrated components:
 ## Quick Start
 
 ### Prerequisites
-- Java 21+ / Maven 3.8+
+- Amazon Corretto 21 (recommended) or any Java 21+ / Maven 3.8+
 - Python 3.11+
 - Docker & Docker Compose
 
@@ -175,4 +175,4 @@ python sim_trade_match_report.py   # Replication scoring
 
 ## License
 
-Proprietary - All rights reserved.
+MIT

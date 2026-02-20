@@ -4,7 +4,7 @@
 ARG SERVICE=strategy-service
 
 # Stage 1: Build
-FROM maven:3.9-eclipse-temurin-21 AS builder
+FROM maven:3.9-amazoncorretto-21 AS builder
 ARG SERVICE
 
 WORKDIR /build
@@ -28,7 +28,7 @@ COPY ${SERVICE}/src ${SERVICE}/src
 RUN mvn package -DskipTests -pl ${SERVICE} -am
 
 # Stage 2: Runtime
-FROM eclipse-temurin:21-jre-alpine
+FROM amazoncorretto:21-alpine
 ARG SERVICE
 
 WORKDIR /app

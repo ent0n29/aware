@@ -69,6 +69,7 @@ make local SERVICE=analytics  # Start Python services
 1. **VPS Server** (Hetzner CAX31 recommended: €16/mo)
    - 8 ARM cores, 16GB RAM, 320GB NVMe
    - Ubuntu 22.04 LTS
+   - Java runtime: Amazon Corretto 21 (or compatible Java 21)
 
 2. **Domain** (e.g., `app.aware.fund`)
 

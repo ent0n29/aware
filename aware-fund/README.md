@@ -1,91 +1,75 @@
-# AWARE FUND
+# AWARE Fund
 
-## The Smart Money Index for Prediction Markets
+AWARE Fund is the product layer on top of Polybot infrastructure:
+- Smart Money scoring
+- PSI index construction
+- Fund analytics and intelligence APIs
+- Dashboard for monitoring and exploration
 
-> **"Don't bet on outcomes. Bet on the best traders being right."**
+## Key Docs
 
----
+- Vision and architecture: `VISION.md`
+- Action plan: `ACTION_PLAN.md`
+- Design decisions: `DESIGN_DECISIONS.md`
+- ML roadmap: `ML_AI_STRATEGY.md`
 
-## Documentation
+## Preferred Local Run
 
-| Document | Purpose |
-|----------|---------|
-| [VISION.md](VISION.md) | **Start here** - Product vision, architecture, status |
-| [ACTION_PLAN.md](ACTION_PLAN.md) | Implementation checklist with current progress |
-| [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) | Key strategic decisions and rationale |
-| [ML_AI_STRATEGY.md](ML_AI_STRATEGY.md) | Machine learning opportunities and roadmap |
-
----
-
-## Quick Start
+From repo root (`aware/`):
 
 ```bash
-# Start infrastructure
-docker-compose -f docker-compose.analytics.yaml up -d
-
-# Run Python API
-cd services/api && CLICKHOUSE_HOST=localhost uvicorn main:app --reload
-
-# Run scoring (daily)
-cd services/analytics && CLICKHOUSE_HOST=localhost python scoring_job.py
+make local
+make status
 ```
 
----
+This starts the full stack (Java services, analytics, API, and web dashboard).
 
-## Project Structure
+## Module-Level Run (If Needed)
 
-```
-aware-fund/
-├── services/
-│   ├── analytics/          # Python: scoring, indices, detection
-│   │   ├── scoring_job.py  # Smart Money Score calculation
-│   │   ├── psi_index.py    # PSI index construction
-│   │   ├── insider_detector.py
-│   │   ├── edge_decay.py
-│   │   └── ml/             # ML training pipeline
-│   ├── api/                # FastAPI server
-│   │   └── main.py         # 40+ endpoints
-│   └── web/                # Next.js dashboard
-├── docs/
-│   └── archive/            # Historical docs (for reference)
-└── *.md                    # Active documentation
-```
-
----
-
-## Current Status
-
-| Component | Status |
-|-----------|--------|
-| Data Pipeline | ✅ Complete |
-| Smart Money Scoring | ✅ Complete |
-| PSI Indices | ✅ Complete |
-| Insider Detection | ✅ Complete |
-| Fund Engine (Java) | ✅ Complete |
-| Dashboard | 🟡 Basic |
-| Smart Contracts | ⚪ Pending |
-
----
-
-## API Endpoints
+### Analytics
 
 ```bash
-# Leaderboard
-curl localhost:8000/api/leaderboard
-
-# PSI Index
-curl localhost:8000/api/indices/PSI-10
-
-# Fund NAV
-curl localhost:8000/api/fund/nav
-
-# Insider Alerts
-curl localhost:8000/api/insider/alerts
-
-# Discovery
-curl localhost:8000/api/discovery/hidden-gems
+cd services/analytics
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+CLICKHOUSE_HOST=localhost python run_all.py
 ```
 
----
+### API
 
-*See [VISION.md](VISION.md) for complete product details.*
+```bash
+cd services/api
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+CLICKHOUSE_HOST=localhost uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Web
+
+```bash
+cd services/web
+npm install
+npm run dev
+```
+
+## Common API Endpoints
+
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/leaderboard
+curl http://localhost:8000/api/indices/PSI-10
+curl http://localhost:8000/api/fund/nav
+curl http://localhost:8000/api/insider/alerts
+curl http://localhost:8000/api/freshness
+```
+
+## Current Status (High Level)
+
+- Data pipeline and scoring are active.
+- PSI index generation is implemented.
+- Insider/consensus/ML endpoints are available.
+- Smart-contract fund custody flows are pending.
+
+For full detail, use `ACTION_PLAN.md` as the execution checklist.

@@ -1,177 +1,162 @@
 # AWARE
 
-**Polymarket trading infrastructure and the AWARE Fund platform.**
+AWARE is a combined codebase for:
+- **Polybot core infrastructure** (Java execution/strategy/ingestion services)
+- **AWARE Fund product layer** (Python analytics, API, and web dashboard)
 
-This repository contains two integrated components:
+The project focuses on trader intelligence and index-style exposure for Polymarket data.
 
-1. **Polybot** - Java trading infrastructure for Polymarket (order execution, strategies, data ingestion)
-2. **AWARE Fund** - Python analytics platform for the "Smart Money Index" product
+## Repository Map
 
----
+```text
+aware/
+├── executor-service/                    # Java executor (orders, portfolio, settlement)
+├── strategy-service/                    # Java strategy + fund mirroring logic
+├── ingestor-service/                    # Java ingestion pipelines
+├── analytics-service/                   # ClickHouse schema/init + analytics service
+├── infrastructure-orchestrator-service/ # Java orchestrator for Docker stacks
+├── polybot-core/                        # Shared Java components
+├── aware-fund/
+│   ├── services/analytics/              # Python scoring, PSI indices, ML jobs
+│   ├── services/api/                    # FastAPI service
+│   └── services/web/                    # Next.js dashboard
+├── research/                            # Research and replication scripts
+├── docker-compose.local.yaml            # Full local stack
+└── Makefile                             # Main development entrypoint
+```
 
-## Quick Start
+## Quick Start (Recommended)
+
+Use the Docker-based local stack.
 
 ### Prerequisites
-- Amazon Corretto 21 (recommended) or any Java 21+ / Maven 3.8+
-- Python 3.11+
-- Docker & Docker Compose
 
-### 1. Start Infrastructure
+- Docker Engine/Desktop with Compose plugin
+- `make`
 
-```bash
-docker-compose -f docker-compose.analytics.yaml up -d
-```
-
-### 2. Run Services
+### Start
 
 ```bash
-# Java services (each in separate terminal)
-cd executor-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
-cd strategy-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
-cd ingestor-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop
-
-# AWARE Fund API
-cd aware-fund/services/api
-CLICKHOUSE_HOST=localhost uvicorn main:app --reload
-
-# AWARE Fund Dashboard
-cd aware-fund/services/web && npm install && npm run dev
+make local
 ```
 
----
-
-## Architecture
-
-```
-aware/
-├── polybot-core/           # Shared Java library (APIs, WebSocket, events)
-├── executor-service/       # Order execution, paper trading, settlement
-├── strategy-service/       # Trading strategies + Fund mirror engine
-├── ingestor-service/       # Market data & trade ingestion
-├── analytics-service/      # ClickHouse schemas
-├── research/               # Python research & analysis tools
-└── aware-fund/             # AWARE Fund product
-    ├── services/analytics/ # Smart Money scoring, PSI indices
-    ├── services/api/       # FastAPI (40+ endpoints)
-    └── services/web/       # Next.js dashboard
-```
-
----
-
-## Components
-
-### Polybot (Trading Infrastructure)
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| executor-service | 8080 | Order execution, simulation, settlement |
-| strategy-service | 8081 | Trading strategies, fund mirroring |
-| ingestor-service | 8082 | Market data ingestion |
-
-### AWARE Fund (Analytics Platform)
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| Python API | 8000 | Leaderboard, indices, alerts, fund data |
-| Next.js Dashboard | 3000 | Visualization UI |
-
----
-
-## AWARE Fund Product
-
-> *"Don't bet on outcomes. Bet on the best traders being right."*
-
-The AWARE Fund is a "Smart Money Index" for Polymarket - passive investment products that mirror top traders.
-
-### PSI Indices (Polymarket Smart Index)
-
-| Index | Description |
-|-------|-------------|
-| PSI-10 | Top 10 traders by Smart Money Score |
-| PSI-CRYPTO | Top crypto market specialists |
-| PSI-POLITICS | Top political forecasters |
-| PSI-SPORTS | Top sports bettors |
-
-### Smart Money Score (0-100)
-
-```
-Score = 0.40 × Profitability     (P&L percentile)
-      + 0.30 × Risk-Adjusted     (Sharpe ratio)
-      + 0.20 × Consistency       (win rate - variance)
-      + 0.10 × Track Record      (days active + trades)
-```
-
-### API Endpoints
+### Check health
 
 ```bash
-# Leaderboard
-curl localhost:8000/api/leaderboard
-
-# PSI Index
-curl localhost:8000/api/indices/PSI-10
-
-# Fund NAV
-curl localhost:8000/api/fund/nav
-
-# Discovery
-curl localhost:8000/api/discovery/hidden-gems
-
-# Insider Alerts
-curl localhost:8000/api/insider/alerts
+make status
 ```
 
----
+### View logs
+
+```bash
+make logs
+# or: make logs SERVICE=strategy
+```
+
+### Stop
+
+```bash
+make down
+```
+
+## Service Endpoints (Local Stack)
+
+| Component | URL |
+|---|---|
+| Web dashboard | http://localhost:3000 |
+| API | http://localhost:8000 |
+| Executor | http://localhost:8080 |
+| Strategy | http://localhost:8081 |
+| Ingestor | http://localhost:8083 |
+| ClickHouse | http://localhost:8123 |
+| Redpanda admin | http://localhost:9644 |
+| Prometheus (optional profile) | http://localhost:9090 |
+| Grafana (optional profile) | http://localhost:3001 |
+
+## Alternative Workflow (Run Services From Host)
+
+If you want to run Java/Python services outside Docker:
+
+```bash
+# Infra only (ClickHouse + Kafka)
+make infra
+
+# Java
+make java-build
+make executor
+make strategy
+make ingestor
+
+# Python
+make python-setup
+make python-analytics
+make python-api
+
+# Web
+make web-install
+make web-dev
+```
+
+## Useful Make Targets
+
+```bash
+make help
+make build
+make local
+make status
+make logs
+make train
+make train-all
+make analytics
+make down
+make clean
+```
+
+## API Examples
+
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/leaderboard
+curl http://localhost:8000/api/indices/PSI-10
+curl http://localhost:8000/api/fund/nav
+curl http://localhost:8000/api/insider/alerts
+```
+
+## Testing
+
+```bash
+# Java tests
+mvn test
+
+# Module-level example
+mvn test -pl strategy-service
+```
 
 ## Documentation
 
-| Document | Purpose |
-|----------|---------|
-| [CLAUDE.md](CLAUDE.md) | AI assistant context & commands |
-| [aware-fund/VISION.md](aware-fund/VISION.md) | Product vision & architecture |
-| [aware-fund/ACTION_PLAN.md](aware-fund/ACTION_PLAN.md) | Implementation progress |
-| [docs/EXAMPLE_STRATEGY_SPEC.md](docs/EXAMPLE_STRATEGY_SPEC.md) | Strategy implementation guide |
+- Product vision: `aware-fund/VISION.md`
+- Execution roadmap: `aware-fund/ACTION_PLAN.md`
+- Strategy and product choices: `aware-fund/DESIGN_DECISIONS.md`
+- ML strategy notes: `aware-fund/ML_AI_STRATEGY.md`
+- Research usage: `research/README.md`
+- Deployment notes: `DEPLOYMENT.md`
 
----
+## Current State
 
-## Development
+- Core ingestion/execution/scoring stack is operational.
+- Fund mirror engine is implemented in Java strategy service.
+- API and dashboard are functional for local/dev usage.
+- Smart-contract-based custody/deposit flows are still pending for a full public fund launch.
 
-### Build
+## Security
 
-```bash
-mvn clean package -DskipTests
-```
+- Do not commit credentials, private keys, or real `.env` values.
+- Use `.env.example` as template only.
+- Run secret scanning before public releases (for example, `gitleaks`).
 
-### Test
+## ARM / Apple Silicon
 
-```bash
-mvn test
-mvn test -pl strategy-service -Dtest=GabagoolDirectionalEngineTest
-```
-
-### Research Tools
-
-```bash
-cd research && source .venv/bin/activate
-python snapshot_report.py          # Data snapshots
-python deep_analysis.py            # Strategy analysis
-python sim_trade_match_report.py   # Replication scoring
-```
-
----
-
-## Status
-
-| Component | Status |
-|-----------|--------|
-| Trading Infrastructure | Production |
-| Data Ingestion | Production |
-| Smart Money Scoring | Complete |
-| PSI Indices | Complete |
-| Fund Mirror Engine | Complete |
-| Dashboard | Basic |
-| Smart Contracts | Pending |
-
----
+The stack is compatible with ARM64 local environments (Docker/Colima or Docker Desktop on Apple Silicon).
 
 ## License
 

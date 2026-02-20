@@ -91,7 +91,7 @@ services:
       HFT_MODE: PAPER
       JAVA_OPTS: "-Xmx1g -Xms512m"
     ports:
-      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8081:8081"
     restart: unless-stopped
 
   ingestor:
@@ -110,7 +110,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       JAVA_OPTS: "-Xmx512m -Xms256m"
     ports:
-      - "127.0.0.1:8083:8080"
+      - "127.0.0.1:8083:8083"
     restart: unless-stopped
 
   # Python Services

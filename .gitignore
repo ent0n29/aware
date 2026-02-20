@@ -98,6 +98,7 @@ secrets.json
 # ============================================================================
 research/data/
 research/output/
+research/exec_output.txt
 *.parquet
 *.feather
 !research/data/.gitkeep

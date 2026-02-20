@@ -247,8 +247,8 @@ status() {
     for service in "${services[@]}"; do
         case "$service" in
             aware-executor) health_url="http://localhost:8080/api/polymarket/health" ;;
-            aware-strategy) health_url="http://localhost:8080/api/strategy/status" ;;
-            aware-api) health_url="http://localhost:8000/health" ;;
+            aware-strategy) health_url="http://localhost:8081/api/strategy/status" ;;
+            aware-api) health_url="http://localhost:8000/api/health" ;;
             aware-web) health_url="http://localhost:3000/" ;;
             *) health_url="http://localhost/health" ;;
         esac

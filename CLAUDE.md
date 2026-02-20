@@ -15,7 +15,7 @@ aware/
 ├── executor-service/       # Order execution (port 8080)
 ├── strategy-service/       # Strategies + Fund engine (port 8081)
 ├── ingestor-service/       # Data ingestion (port 8083)
-├── analytics-service/      # ClickHouse schemas only (init/*.sql)
+├── analytics-service/      # ClickHouse schemas + analytics API service
 ├── deploy/                 # Docker Compose configs & deployment scripts
 ├── research/               # Python analysis & research tools
 └── aware-fund/             # AWARE Fund product
@@ -47,7 +47,7 @@ mvn test -pl strategy-service -Dtest=GabagoolDirectionalEngineTest  # Single tes
 
 ```bash
 # Infrastructure first
-docker-compose -f docker-compose.analytics.yaml up -d
+docker compose -f docker-compose.analytics.yaml up -d
 
 # Java services (each in separate terminal)
 cd executor-service && mvn spring-boot:run -Dspring-boot.run.profiles=develop

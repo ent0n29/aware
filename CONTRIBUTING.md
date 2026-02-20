@@ -5,18 +5,18 @@ Internal development guidelines for the AWARE repository.
 ## Setup
 
 ```bash
-# Prerequisites
-- Amazon Corretto 21 (recommended) or Java 21+
-- Maven 3.8+
-- Python 3.11+
-- Docker & Docker Compose
-
 # Build
 mvn clean package -DskipTests
 
 # Infrastructure
-docker-compose -f docker-compose.analytics.yaml up -d
+docker compose -f docker-compose.analytics.yaml up -d
 ```
+
+Prerequisites:
+- Amazon Corretto 21 (recommended) or Java 21+
+- Maven 3.8+
+- Python 3.11+
+- Docker with Compose plugin
 
 ## Code Style
 

@@ -55,8 +55,11 @@ make ingestor       # Terminal 3: Start ingestor
 
 ### Option 3: Hybrid (Python in Docker, Java in IDE)
 ```bash
-make infra                    # Start infrastructure
-make local SERVICE=analytics  # Start Python services
+make infra  # Start ClickHouse + Kafka
+
+# Start Python product services only
+docker compose -f docker-compose.local.yaml up -d analytics api web
+
 # Run Java services from IDE
 ```
 

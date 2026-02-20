@@ -114,9 +114,9 @@ services:
       HFT_MODE: ${HFT_MODE:-PAPER}
       JAVA_OPTS: "-Xmx2g -Xms1g"
     ports:
-      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8081:8081"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/strategy/status"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/api/strategy/status"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -142,9 +142,9 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       JAVA_OPTS: "-Xmx1g -Xms512m"
     ports:
-      - "127.0.0.1:8083:8080"
+      - "127.0.0.1:8083:8083"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8083/actuator/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -188,7 +188,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -8,7 +8,6 @@
   - `executor-service/`: order execution + PAPER simulator (`PaperExchangeSimulator`).
   - `ingestor-service/`: ingestion pipelines (WS/REST) into ClickHouse/Kafka.
   - `analytics-service/`: ClickHouse sinks + schema init SQL in `analytics-service/clickhouse/init/`.
-  - `infrastructure-orchestrator-service/`: starts Docker stacks (Redpanda/ClickHouse/monitoring).
 - Supporting:
   - `research/`: Python reports/backtests (match %, coverage, calibration).
   - `logs/`: runtime logs + `.pid` files created by scripts.

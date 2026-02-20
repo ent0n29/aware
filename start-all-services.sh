@@ -1,124 +1,89 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
+
+cd "$(dirname "$0")"
 
 echo "=========================================="
-echo "Starting All Polybot Services"
+echo "Starting AWARE Java + Infra Services"
 echo "=========================================="
 echo ""
 
-# Navigate to project root
-cd "$(dirname "$0")"
-
-# Build if needed (missing jars OR any src/resources newer than jar)
 needs_build=false
 check_build() {
-    local jar_path="$1"
-    local src_path="$2"
-    if [ ! -f "$jar_path" ]; then
-        needs_build=true
-        return
-    fi
-    if [ -d "$src_path" ]; then
-        if find "$src_path" -type f -newer "$jar_path" -print -quit | grep -q .; then
-            needs_build=true
-        fi
-    fi
+  local jar_path="$1"
+  local src_path="$2"
+  if [ ! -f "$jar_path" ]; then
+    needs_build=true
+    return
+  fi
+  if [ -d "$src_path" ] && find "$src_path" -type f -newer "$jar_path" -print -quit | grep -q .; then
+    needs_build=true
+  fi
 }
 
 check_build "executor-service/target/executor-service-0.0.1-SNAPSHOT.jar" "executor-service/src"
 check_build "strategy-service/target/strategy-service-0.0.1-SNAPSHOT.jar" "strategy-service/src"
 check_build "ingestor-service/target/ingestor-service-0.0.1-SNAPSHOT.jar" "ingestor-service/src"
 check_build "analytics-service/target/analytics-service-0.0.1-SNAPSHOT.jar" "analytics-service/src"
-check_build "infrastructure-orchestrator-service/target/infrastructure-orchestrator-service-0.0.1-SNAPSHOT.jar" "infrastructure-orchestrator-service/src"
 
 if [ "$needs_build" = true ]; then
-    echo "Building services (incremental)..."
-    mvn package -DskipTests
-    echo ""
+  echo "Building Java services..."
+  mvn package -DskipTests
+  echo ""
 fi
 
-# Create logs directory if not exists
 mkdir -p logs
 
-echo "Starting services in background..."
-echo ""
+echo "1) Starting analytics infrastructure (Redpanda + ClickHouse)..."
+docker compose -f docker-compose.analytics.yaml up -d
 
-# Start infrastructure orchestrator first (it will start all Docker stacks)
-echo "1. Starting infrastructure-orchestrator-service (port 8084)..."
-echo "   This will start: Redpanda, ClickHouse, Prometheus, Grafana, Alertmanager"
-java -jar infrastructure-orchestrator-service/target/infrastructure-orchestrator-service-0.0.1-SNAPSHOT.jar \
-    --spring.profiles.active=develop \
-    > logs/infrastructure-orchestrator-service.log 2>&1 &
-echo $! > logs/infrastructure-orchestrator-service.pid
-echo "   PID: $(cat logs/infrastructure-orchestrator-service.pid)"
+echo "2) Starting monitoring stack (if configured)..."
+if [ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+  docker compose -f docker-compose.monitoring.yaml up -d
+  echo "   Monitoring started on :3000/:9090/:9093"
+else
+  echo "   Skipped monitoring stack (set GRAFANA_ADMIN_PASSWORD to enable)"
+fi
 
-# Wait for infrastructure to be ready
-echo "   Waiting for infrastructure stacks to be ready..."
-sleep 20
+start_service() {
+  local name="$1"
+  local jar="$2"
+  local port="$3"
+  local pid_file="logs/${name}.pid"
+  local log_file="logs/${name}.log"
 
-# Start executor service
-echo "2. Starting executor-service (port 8080)..."
-java -jar executor-service/target/executor-service-0.0.1-SNAPSHOT.jar \
-    --spring.profiles.active=develop \
-    > logs/executor-service.log 2>&1 &
-echo $! > logs/executor-service.pid
-echo "   PID: $(cat logs/executor-service.pid)"
+  if [ -f "$pid_file" ] && ps -p "$(cat "$pid_file")" >/dev/null 2>&1; then
+    echo "   ${name} already running (PID: $(cat "$pid_file"))"
+    return
+  fi
 
-# Start strategy service
-echo "3. Starting strategy-service (port 8081)..."
-java -jar strategy-service/target/strategy-service-0.0.1-SNAPSHOT.jar \
-    --spring.profiles.active=develop \
-    > logs/strategy-service.log 2>&1 &
-echo $! > logs/strategy-service.pid
-echo "   PID: $(cat logs/strategy-service.pid)"
+  echo "   Starting ${name} (port ${port})..."
+  java -jar "$jar" --spring.profiles.active=develop >"$log_file" 2>&1 &
+  echo $! >"$pid_file"
+  echo "   PID: $(cat "$pid_file")"
+}
 
-# Start ingestor service
-echo "4. Starting ingestor-service (port 8083)..."
-java -jar ingestor-service/target/ingestor-service-0.0.1-SNAPSHOT.jar \
-    --spring.profiles.active=develop \
-    > logs/ingestor-service.log 2>&1 &
-echo $! > logs/ingestor-service.pid
-echo "   PID: $(cat logs/ingestor-service.pid)"
-
-# Start analytics service
-echo "5. Starting analytics-service (port 8082)..."
-java -jar analytics-service/target/analytics-service-0.0.1-SNAPSHOT.jar \
-    --spring.profiles.active=develop \
-    > logs/analytics-service.log 2>&1 &
-echo $! > logs/analytics-service.pid
-echo "   PID: $(cat logs/analytics-service.pid)"
+echo "3) Starting Java services..."
+start_service "executor-service" "executor-service/target/executor-service-0.0.1-SNAPSHOT.jar" "8080"
+start_service "strategy-service" "strategy-service/target/strategy-service-0.0.1-SNAPSHOT.jar" "8081"
+start_service "ingestor-service" "ingestor-service/target/ingestor-service-0.0.1-SNAPSHOT.jar" "8083"
+start_service "analytics-service" "analytics-service/target/analytics-service-0.0.1-SNAPSHOT.jar" "8082"
 
 echo ""
 echo "=========================================="
-echo "✓ All services started"
+echo "✓ AWARE Java + infra stack started"
 echo "=========================================="
 echo ""
 echo "Service URLs:"
-echo "  • Executor:         http://localhost:8080/actuator/health"
-echo "  • Strategy:         http://localhost:8081/actuator/health"
-echo "  • Analytics:        http://localhost:8082/actuator/health"
-echo "  • Ingestor:         http://localhost:8083/actuator/health"
-echo "  • Infrastructure:   http://localhost:8084/actuator/health"
+echo "  • Executor:    http://localhost:8080/actuator/health"
+echo "  • Strategy:    http://localhost:8081/actuator/health"
+echo "  • Analytics:   http://localhost:8082/actuator/health"
+echo "  • Ingestor:    http://localhost:8083/actuator/health"
 echo ""
-echo "Analytics Stack:"
-echo "  • ClickHouse HTTP:  http://localhost:8123"
-echo "  • ClickHouse TCP:   tcp://localhost:9000"
-echo "  • Redpanda Kafka:   localhost:9092"
-echo "  • Redpanda Admin:   http://localhost:9644"
-echo ""
-echo "Monitoring Stack:"
-echo "  • Grafana:          http://localhost:3000 (admin/$GRAFANA_ADMIN_PASSWORD)"
-echo "  • Prometheus:       http://localhost:9090"
-echo "  • Alertmanager:     http://localhost:9093"
-echo ""
-echo "Logs:"
-echo "  • tail -f logs/executor-service.log"
-echo "  • tail -f logs/strategy-service.log"
-echo "  • tail -f logs/analytics-service.log"
-echo "  • tail -f logs/ingestor-service.log"
-echo "  • tail -f logs/infrastructure-orchestrator-service.log"
+echo "Infrastructure:"
+echo "  • ClickHouse:  http://localhost:8123"
+echo "  • Redpanda:    localhost:9092"
 echo ""
 echo "To stop all services:"
 echo "  ./stop-all-services.sh"
-echo ""

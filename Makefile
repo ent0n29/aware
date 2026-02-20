@@ -90,7 +90,7 @@ status: ## Check service health status
 	@echo '${GREEN}Health Checks:${RESET}'
 	@curl -s http://localhost:8080/api/polymarket/health > /dev/null 2>&1 && echo '  ✓ Executor (8080)' || echo '  ✗ Executor (8080)'
 	@curl -s http://localhost:8081/api/strategy/status > /dev/null 2>&1 && echo '  ✓ Strategy (8081)' || echo '  ✗ Strategy (8081)'
-	@curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '  ✓ API (8000)' || echo '  ✗ API (8000)'
+	@curl -s http://localhost:8000/api/health > /dev/null 2>&1 && echo '  ✓ API (8000)' || echo '  ✗ API (8000)'
 	@curl -s http://localhost:3000 > /dev/null 2>&1 && echo '  ✓ Web (3000)' || echo '  ✗ Web (3000)'
 	@curl -s http://localhost:8123 > /dev/null 2>&1 && echo '  ✓ ClickHouse (8123)' || echo '  ✗ ClickHouse (8123)'
 

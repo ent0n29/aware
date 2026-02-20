@@ -45,6 +45,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!aware-fund/services/web/src/lib/
+!aware-fund/services/web/src/lib/**
 lib64/
 parts/
 sdist/
@@ -105,6 +107,7 @@ research/output/
 # ============================================================================
 logs/
 !logs/.gitkeep
+strategy-service/logs/*.json
 .cache/
 *.log
 *.tmp

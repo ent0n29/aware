@@ -18,6 +18,7 @@ Migration Path:
 """
 
 import os
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -30,6 +31,10 @@ import clickhouse_connect
 # Create router
 router = APIRouter(prefix="/api/invest", tags=["investments"])
 funds_router = APIRouter(prefix="/api/funds", tags=["funds"])
+
+FUND_TYPE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,31}$")
+WALLET_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+ALLOWED_FUND_STATUS = {"active", "paused", "closed"}
 
 
 # ============================================================================
@@ -141,13 +146,29 @@ def get_client():
     )
 
 
+def normalize_fund_type(fund_type: str) -> str:
+    """Normalize and validate a fund identifier."""
+    normalized = fund_type.strip().upper()
+    if not FUND_TYPE_RE.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail=f"Invalid fund_type: {fund_type}")
+    return normalized
+
+
+def normalize_wallet_address(wallet_address: str) -> str:
+    """Normalize and validate wallet addresses."""
+    normalized = wallet_address.strip()
+    if not WALLET_ADDRESS_RE.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="Invalid wallet_address format")
+    return normalized.lower()
+
+
 def get_current_nav(client, fund_type: str) -> Decimal:
     """Get current NAV per share for a fund."""
-    result = client.query(f"""
+    result = client.query("""
         SELECT nav_per_share
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type = '{fund_type}'
-    """)
+        WHERE fund_type = %(fund_type)s
+    """, parameters={"fund_type": fund_type})
     if result.result_rows:
         return Decimal(str(result.result_rows[0][0]))
     return Decimal('1.0')  # Default NAV for new funds
@@ -155,12 +176,12 @@ def get_current_nav(client, fund_type: str) -> Decimal:
 
 def get_user_shares(client, wallet_address: str, fund_type: str) -> tuple[Decimal, Decimal]:
     """Get user's current share balance and cost basis."""
-    result = client.query(f"""
+    result = client.query("""
         SELECT shares_balance, cost_basis_usdc
         FROM polybot.aware_user_shares FINAL
-        WHERE wallet_address = '{wallet_address}'
-          AND fund_type = '{fund_type}'
-    """)
+        WHERE wallet_address = %(wallet_address)s
+          AND fund_type = %(fund_type)s
+    """, parameters={"wallet_address": wallet_address, "fund_type": fund_type})
     if result.result_rows:
         return (
             Decimal(str(result.result_rows[0][0])),
@@ -171,20 +192,20 @@ def get_user_shares(client, wallet_address: str, fund_type: str) -> tuple[Decima
 
 def ensure_user_exists(client, wallet_address: str) -> str:
     """Ensure user exists, create if not. Returns user_id."""
-    result = client.query(f"""
+    result = client.query("""
         SELECT user_id
         FROM polybot.aware_users FINAL
-        WHERE wallet_address = '{wallet_address}'
-    """)
+        WHERE wallet_address = %(wallet_address)s
+    """, parameters={"wallet_address": wallet_address})
     if result.result_rows:
         return str(result.result_rows[0][0])
 
     # Create new user
     user_id = str(uuid.uuid4())
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_users (user_id, wallet_address)
-        VALUES ('{user_id}', '{wallet_address}')
-    """)
+        VALUES (%(user_id)s, %(wallet_address)s)
+    """, parameters={"user_id": user_id, "wallet_address": wallet_address})
     return user_id
 
 
@@ -207,16 +228,18 @@ async def deposit(request: DepositRequest):
     Note: In MVP, we trust the tx_hash. In V1, we verify on-chain.
     """
     client = get_client()
+    fund_type = normalize_fund_type(request.fund_type)
+    wallet_address = normalize_wallet_address(request.wallet_address)
 
     # Validate fund
-    fund_result = client.query(f"""
+    fund_result = client.query("""
         SELECT status, min_deposit_usdc, nav_per_share
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type = '{request.fund_type}'
-    """)
+        WHERE fund_type = %(fund_type)s
+    """, parameters={"fund_type": fund_type})
 
     if not fund_result.result_rows:
-        raise HTTPException(404, f"Fund not found: {request.fund_type}")
+        raise HTTPException(404, f"Fund not found: {fund_type}")
 
     status, min_deposit, nav = fund_result.result_rows[0]
     nav = Decimal(str(nav))
@@ -228,58 +251,87 @@ async def deposit(request: DepositRequest):
         raise HTTPException(400, f"Minimum deposit is ${min_deposit}")
 
     # Ensure user exists
-    user_id = ensure_user_exists(client, request.wallet_address)
+    user_id = ensure_user_exists(client, wallet_address)
 
     # Calculate shares
     shares = request.usdc_amount / nav
 
     # Get current balance
     current_shares, current_cost = get_user_shares(
-        client, request.wallet_address, request.fund_type
+        client, wallet_address, fund_type
     )
 
-    new_shares = current_shares + shares
-    new_cost = current_cost + request.usdc_amount
+    is_new_depositor = 1 if current_shares == 0 else 0
 
     # Record transaction
     tx_id = str(uuid.uuid4())
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_user_transactions
         (tx_id, user_id, wallet_address, fund_type, tx_type,
          usdc_amount, shares_amount, nav_per_share, status, tx_hash)
         VALUES
-        ('{tx_id}', '{user_id}', '{request.wallet_address}', '{request.fund_type}',
-         'DEPOSIT', {request.usdc_amount}, {shares}, {nav},
-         'confirmed', {f"'{request.tx_hash}'" if request.tx_hash else 'NULL'})
-    """)
+        (%(tx_id)s, %(user_id)s, %(wallet_address)s, %(fund_type)s,
+         'DEPOSIT', %(usdc_amount)s, %(shares)s, %(nav)s, 'confirmed', %(tx_hash)s)
+    """, parameters={
+        "tx_id": tx_id,
+        "user_id": user_id,
+        "wallet_address": wallet_address,
+        "fund_type": fund_type,
+        "usdc_amount": request.usdc_amount,
+        "shares": shares,
+        "nav": nav,
+        "tx_hash": request.tx_hash,
+    })
 
-    # Update share balance
-    client.command(f"""
+    # Update share balance (computed server-side to reduce lost updates).
+    client.command("""
         INSERT INTO polybot.aware_user_shares
         (user_id, wallet_address, fund_type, shares_balance, cost_basis_usdc,
          first_deposit_at, last_activity_at)
-        VALUES
-        ('{user_id}', '{request.wallet_address}', '{request.fund_type}',
-         {new_shares}, {new_cost}, now64(3), now64(3))
-    """)
+        SELECT
+            %(user_id)s,
+            %(wallet_address)s,
+            %(fund_type)s,
+            coalesce(max(shares_balance), CAST(0 AS Decimal(18, 8))) + %(shares)s,
+            coalesce(max(cost_basis_usdc), CAST(0 AS Decimal(18, 6))) + %(usdc_amount)s,
+            coalesce(min(first_deposit_at), now64(3)),
+            now64(3)
+        FROM polybot.aware_user_shares FINAL
+        WHERE wallet_address = %(wallet_address)s
+          AND fund_type = %(fund_type)s
+    """, parameters={
+        "user_id": user_id,
+        "wallet_address": wallet_address,
+        "fund_type": fund_type,
+        "shares": shares,
+        "usdc_amount": request.usdc_amount,
+    })
 
     # Update fund summary
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_fund_summary
         (fund_type, total_aum, total_shares, nav_per_share, num_depositors)
         SELECT
-            '{request.fund_type}',
-            total_aum + {request.usdc_amount},
-            total_shares + {shares},
+            %(fund_type)s,
+            total_aum + %(usdc_amount)s,
+            total_shares + %(shares)s,
             nav_per_share,
-            num_depositors + if({current_shares} = 0, 1, 0)
+            num_depositors + %(is_new_depositor)s
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type = '{request.fund_type}'
-    """)
+        WHERE fund_type = %(fund_type)s
+    """, parameters={
+        "fund_type": fund_type,
+        "usdc_amount": request.usdc_amount,
+        "shares": shares,
+        "is_new_depositor": is_new_depositor,
+    })
+
+    # Re-read after write so response reflects latest persisted balance.
+    new_shares, _ = get_user_shares(client, wallet_address, fund_type)
 
     return DepositResponse(
         tx_id=tx_id,
-        fund_type=request.fund_type,
+        fund_type=fund_type,
         usdc_amount=request.usdc_amount,
         shares_received=shares,
         nav_per_share=nav,
@@ -307,17 +359,19 @@ async def withdraw(request: WithdrawRequest):
     Note: Withdrawals may have a delay for liquidity management.
     """
     client = get_client()
+    fund_type = normalize_fund_type(request.fund_type)
+    wallet_address = normalize_wallet_address(request.wallet_address)
 
     # Get current holdings
     current_shares, current_cost = get_user_shares(
-        client, request.wallet_address, request.fund_type
+        client, wallet_address, fund_type
     )
 
     if current_shares <= 0:
         raise HTTPException(400, "No shares to withdraw")
 
     # Get current NAV
-    nav = get_current_nav(client, request.fund_type)
+    nav = get_current_nav(client, fund_type)
 
     # Calculate shares to redeem
     if request.withdraw_all:
@@ -342,10 +396,10 @@ async def withdraw(request: WithdrawRequest):
     new_cost = current_cost - cost_reduction
 
     # Get user_id
-    user_result = client.query(f"""
+    user_result = client.query("""
         SELECT user_id FROM polybot.aware_users FINAL
-        WHERE wallet_address = '{request.wallet_address}'
-    """)
+        WHERE wallet_address = %(wallet_address)s
+    """, parameters={"wallet_address": wallet_address})
     user_id = str(user_result.result_rows[0][0]) if user_result.result_rows else str(uuid.uuid4())
 
     # Create withdrawal request
@@ -353,53 +407,94 @@ async def withdraw(request: WithdrawRequest):
     tx_id = str(uuid.uuid4())
 
     # Record transaction (pending)
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_user_transactions
         (tx_id, user_id, wallet_address, fund_type, tx_type,
          usdc_amount, shares_amount, nav_per_share, status)
         VALUES
-        ('{tx_id}', '{user_id}', '{request.wallet_address}', '{request.fund_type}',
-         'WITHDRAW', {usdc_amount}, {shares_to_redeem}, {nav}, 'pending')
-    """)
+        (%(tx_id)s, %(user_id)s, %(wallet_address)s, %(fund_type)s,
+         'WITHDRAW', %(usdc_amount)s, %(shares_amount)s, %(nav)s, 'pending')
+    """, parameters={
+        "tx_id": tx_id,
+        "user_id": user_id,
+        "wallet_address": wallet_address,
+        "fund_type": fund_type,
+        "usdc_amount": usdc_amount,
+        "shares_amount": shares_to_redeem,
+        "nav": nav,
+    })
 
     # Create withdrawal request (for processing queue)
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_withdrawal_requests
         (request_id, user_id, wallet_address, fund_type,
          shares_amount, estimated_usdc, nav_at_request, status, process_after)
         VALUES
-        ('{request_id}', '{user_id}', '{request.wallet_address}', '{request.fund_type}',
-         {shares_to_redeem}, {usdc_amount}, {nav}, 'pending',
+        (%(request_id)s, %(user_id)s, %(wallet_address)s, %(fund_type)s,
+         %(shares_amount)s, %(usdc_amount)s, %(nav)s, 'pending',
          now64(3) + INTERVAL 1 HOUR)
-    """)
+    """, parameters={
+        "request_id": request_id,
+        "user_id": user_id,
+        "wallet_address": wallet_address,
+        "fund_type": fund_type,
+        "shares_amount": shares_to_redeem,
+        "usdc_amount": usdc_amount,
+        "nav": nav,
+    })
 
-    # Update share balance (immediately deduct shares)
-    client.command(f"""
+    # Update share balance (immediately deduct shares; computed server-side).
+    client.command("""
         INSERT INTO polybot.aware_user_shares
         (user_id, wallet_address, fund_type, shares_balance, cost_basis_usdc,
          first_deposit_at, last_activity_at)
-        VALUES
-        ('{user_id}', '{request.wallet_address}', '{request.fund_type}',
-         {new_shares}, {new_cost}, now64(3), now64(3))
-    """)
+        SELECT
+            %(user_id)s,
+            %(wallet_address)s,
+            %(fund_type)s,
+            greatest(
+                coalesce(max(shares_balance), CAST(0 AS Decimal(18, 8))) - %(shares_amount)s,
+                CAST(0 AS Decimal(18, 8))
+            ),
+            greatest(
+                coalesce(max(cost_basis_usdc), CAST(0 AS Decimal(18, 6))) - %(cost_reduction)s,
+                CAST(0 AS Decimal(18, 6))
+            ),
+            coalesce(min(first_deposit_at), now64(3)),
+            now64(3)
+        FROM polybot.aware_user_shares FINAL
+        WHERE wallet_address = %(wallet_address)s
+          AND fund_type = %(fund_type)s
+    """, parameters={
+        "user_id": user_id,
+        "wallet_address": wallet_address,
+        "fund_type": fund_type,
+        "shares_amount": shares_to_redeem,
+        "cost_reduction": cost_reduction,
+    })
 
     # Update fund summary
-    client.command(f"""
+    client.command("""
         INSERT INTO polybot.aware_fund_summary
         (fund_type, total_aum, total_shares, nav_per_share, num_depositors)
         SELECT
-            '{request.fund_type}',
-            total_aum - {usdc_amount},
-            total_shares - {shares_to_redeem},
+            %(fund_type)s,
+            total_aum - %(usdc_amount)s,
+            total_shares - %(shares_amount)s,
             nav_per_share,
-            num_depositors - if({new_shares} = 0, 1, 0)
+            num_depositors - %(is_final_withdrawal)s
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type = '{request.fund_type}'
-    """)
+        WHERE fund_type = %(fund_type)s
+    """, parameters={
+        "fund_type": fund_type,
+        "usdc_amount": usdc_amount,
+        "shares_amount": shares_to_redeem,
+        "is_final_withdrawal": 1 if new_shares == 0 else 0,
+    })
 
     return WithdrawResponse(
         request_id=request_id,
-        fund_type=request.fund_type,
+        fund_type=fund_type,
         shares_redeemed=shares_to_redeem,
         usdc_amount=usdc_amount,
         nav_per_share=nav,
@@ -419,9 +514,10 @@ async def get_portfolio(wallet_address: str = Query(..., description="User's wal
     Get user's complete portfolio across all funds.
     """
     client = get_client()
+    wallet_address = normalize_wallet_address(wallet_address)
 
     # Get all user holdings
-    result = client.query(f"""
+    result = client.query("""
         SELECT
             s.fund_type,
             s.shares_balance,
@@ -429,9 +525,9 @@ async def get_portfolio(wallet_address: str = Query(..., description="User's wal
             f.nav_per_share
         FROM polybot.aware_user_shares FINAL s
         LEFT JOIN polybot.aware_fund_summary FINAL f ON s.fund_type = f.fund_type
-        WHERE s.wallet_address = '{wallet_address}'
+        WHERE s.wallet_address = %(wallet_address)s
           AND s.shares_balance > 0
-    """)
+    """, parameters={"wallet_address": wallet_address})
 
     holdings = []
     total_value = Decimal('0')
@@ -485,18 +581,33 @@ async def get_transactions(
 ):
     """Get user's transaction history."""
     client = get_client()
+    wallet_address = normalize_wallet_address(wallet_address)
 
-    fund_filter = f"AND fund_type = '{fund_type}'" if fund_type else ""
+    limit = int(limit)
 
-    result = client.query(f"""
-        SELECT tx_id, fund_type, tx_type, usdc_amount, shares_amount,
-               nav_per_share, status, created_at
-        FROM polybot.aware_user_transactions
-        WHERE wallet_address = '{wallet_address}'
-        {fund_filter}
-        ORDER BY created_at DESC
-        LIMIT {limit}
-    """)
+    if fund_type:
+        normalized_fund_type = normalize_fund_type(fund_type)
+        result = client.query(f"""
+            SELECT tx_id, fund_type, tx_type, usdc_amount, shares_amount,
+                   nav_per_share, status, created_at
+            FROM polybot.aware_user_transactions
+            WHERE wallet_address = %(wallet_address)s
+              AND fund_type = %(fund_type)s
+            ORDER BY created_at DESC
+            LIMIT {limit}
+        """, parameters={
+            "wallet_address": wallet_address,
+            "fund_type": normalized_fund_type,
+        })
+    else:
+        result = client.query(f"""
+            SELECT tx_id, fund_type, tx_type, usdc_amount, shares_amount,
+                   nav_per_share, status, created_at
+            FROM polybot.aware_user_transactions
+            WHERE wallet_address = %(wallet_address)s
+            ORDER BY created_at DESC
+            LIMIT {limit}
+        """, parameters={"wallet_address": wallet_address})
 
     return [
         TransactionRecord(
@@ -521,17 +632,20 @@ async def get_transactions(
 async def list_funds(status: str = Query("active")):
     """List all available funds."""
     client = get_client()
+    normalized_status = status.strip().lower()
+    if normalized_status not in ALLOWED_FUND_STATUS:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
-    result = client.query(f"""
+    result = client.query("""
         SELECT
             fund_type, status, description, total_aum, nav_per_share,
             num_depositors, return_24h_pct, return_7d_pct, return_30d_pct,
             return_inception_pct, sharpe_ratio, management_fee_pct,
             performance_fee_pct, min_deposit_usdc, inception_date
         FROM polybot.aware_fund_summary FINAL
-        WHERE status = '{status}'
+        WHERE status = %(status)s
         ORDER BY total_aum DESC
-    """)
+    """, parameters={"status": normalized_status})
 
     return [
         FundInfo(
@@ -578,8 +692,14 @@ async def compare_funds(
     """
     client = get_client()
 
-    funds_list = [f.strip() for f in fund_types.split(",")]
-    funds_str = ",".join(f"'{f}'" for f in funds_list)
+    funds_list = [normalize_fund_type(f) for f in fund_types.split(",") if f.strip()]
+    if not funds_list:
+        raise HTTPException(status_code=400, detail="At least one valid fund_type is required")
+    if len(funds_list) > 20:
+        raise HTTPException(status_code=400, detail="Too many fund_types requested (max 20)")
+
+    query_params = {f"fund_{idx}": fund for idx, fund in enumerate(funds_list)}
+    in_placeholders = ", ".join(f"%({name})s" for name in query_params.keys())
 
     result = client.query(f"""
         SELECT
@@ -588,8 +708,8 @@ async def compare_funds(
             return_inception_pct, sharpe_ratio, management_fee_pct,
             performance_fee_pct, min_deposit_usdc, inception_date
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type IN ({funds_str})
-    """)
+        WHERE fund_type IN ({in_placeholders})
+    """, parameters=query_params)
 
     funds = []
     best_24h = ("", float('-inf'))
@@ -635,16 +755,17 @@ async def compare_funds(
 async def get_fund(fund_type: str):
     """Get detailed information about a specific fund."""
     client = get_client()
+    fund_type = normalize_fund_type(fund_type)
 
-    result = client.query(f"""
+    result = client.query("""
         SELECT
             fund_type, status, description, total_aum, nav_per_share,
             num_depositors, return_24h_pct, return_7d_pct, return_30d_pct,
             return_inception_pct, sharpe_ratio, management_fee_pct,
             performance_fee_pct, min_deposit_usdc, inception_date
         FROM polybot.aware_fund_summary FINAL
-        WHERE fund_type = '{fund_type}'
-    """)
+        WHERE fund_type = %(fund_type)s
+    """, parameters={"fund_type": fund_type})
 
     if not result.result_rows:
         raise HTTPException(404, f"Fund not found: {fund_type}")
@@ -694,6 +815,7 @@ async def get_nav_history(
     Intervals: 5m (5 minutes), 1h (hourly), 1d (daily)
     """
     client = get_client()
+    fund_type = normalize_fund_type(fund_type)
 
     # Map interval to ClickHouse function
     interval_map = {
@@ -702,7 +824,9 @@ async def get_nav_history(
         "1d": "toStartOfDay"
     }
 
-    time_fn = interval_map.get(interval, "toStartOfHour")
+    if interval not in interval_map:
+        raise HTTPException(status_code=400, detail=f"Invalid interval: {interval}")
+    time_fn = interval_map[interval]
 
     result = client.query(f"""
         SELECT
@@ -711,11 +835,11 @@ async def get_nav_history(
             argMax(total_fund_value, calculated_at) as aum,
             argMax(daily_return_pct, calculated_at) as daily_ret
         FROM polybot.aware_fund_nav
-        WHERE fund_type = '{fund_type}'
-          AND calculated_at >= now() - INTERVAL {days} DAY
+        WHERE fund_type = %(fund_type)s
+          AND calculated_at >= addDays(now(), -%(days)s)
         GROUP BY ts
         ORDER BY ts ASC
-    """)
+    """, parameters={"fund_type": fund_type, "days": int(days)})
 
     return [
         NAVHistoryPoint(

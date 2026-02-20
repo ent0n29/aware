@@ -22,6 +22,7 @@ NC='\033[0m' # No Color
 # Configuration
 DEPLOY_DIR="/opt/aware"
 REPO_URL="git@github.com:ent0n29/aware.git"
+COMPOSE_FILE="docker-compose.prod.yaml"
 
 log() {
     echo -e "${GREEN}[AWARE]${NC} $1"
@@ -34,6 +35,10 @@ warn() {
 error() {
     echo -e "${RED}[ERROR]${NC} $1"
     exit 1
+}
+
+compose_cmd() {
+    docker compose -f "$COMPOSE_FILE" "$@"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -84,19 +89,19 @@ setup() {
 
     # Create deploy directory
     log "Creating deployment directory..."
-    mkdir -p $DEPLOY_DIR
-    cd $DEPLOY_DIR
+    mkdir -p "$DEPLOY_DIR"
+    cd "$DEPLOY_DIR"
 
     # Clone repository (if not exists)
     if [ ! -d "$DEPLOY_DIR/.git" ]; then
         log "Cloning repository..."
-        git clone $REPO_URL .
+        git clone "$REPO_URL" .
     fi
 
     # Create .env file if not exists
     if [ ! -f "$DEPLOY_DIR/deploy/.env" ]; then
         log "Creating .env file from template..."
-        cp $DEPLOY_DIR/deploy/.env.example $DEPLOY_DIR/deploy/.env
+        cp "$DEPLOY_DIR/deploy/.env.example" "$DEPLOY_DIR/deploy/.env"
         warn "Please edit $DEPLOY_DIR/deploy/.env with your configuration!"
     fi
 
@@ -119,14 +124,15 @@ ssl() {
         error ".env file not found. Run setup first."
     fi
 
-    source $DEPLOY_DIR/deploy/.env
+    source "$DEPLOY_DIR/deploy/.env"
 
     if [ -z "$DOMAIN" ] || [ -z "$ADMIN_EMAIL" ]; then
         error "DOMAIN and ADMIN_EMAIL must be set in .env"
     fi
 
     # Create directories
-    mkdir -p $DEPLOY_DIR/deploy/nginx/ssl
+    mkdir -p "$DEPLOY_DIR/deploy/nginx/ssl"
+    mkdir -p /etc/letsencrypt
     mkdir -p /var/www/certbot
 
     # Start nginx with HTTP only (for certbot challenge)
@@ -163,8 +169,8 @@ EOF
         certbot/certbot certonly \
         --webroot \
         --webroot-path=/var/www/certbot \
-        -d $DOMAIN \
-        --email $ADMIN_EMAIL \
+        -d "$DOMAIN" \
+        --email "$ADMIN_EMAIL" \
         --agree-tos \
         --no-eff-email
 
@@ -181,7 +187,7 @@ EOF
 deploy() {
     log "Deploying AWARE Fund..."
 
-    cd $DEPLOY_DIR
+    cd "$DEPLOY_DIR"
 
     # Pull latest code
     log "Pulling latest code..."
@@ -189,15 +195,15 @@ deploy() {
 
     # Load environment
     if [ -f "$DEPLOY_DIR/deploy/.env" ]; then
-        export $(cat $DEPLOY_DIR/deploy/.env | grep -v '^#' | xargs)
+        export $(grep -v '^#' "$DEPLOY_DIR/deploy/.env" | xargs)
     fi
 
-    cd $DEPLOY_DIR/deploy
+    cd "$DEPLOY_DIR/deploy"
 
     # Build and start services
     log "Building and starting services..."
-    docker compose -f docker-compose.production.yaml build
-    docker compose -f docker-compose.production.yaml up -d
+    compose_cmd build
+    compose_cmd up -d
 
     # Wait for services to be healthy
     log "Waiting for services to start..."
@@ -215,12 +221,12 @@ deploy() {
 logs() {
     SERVICE=${1:-}
 
-    cd $DEPLOY_DIR/deploy
+    cd "$DEPLOY_DIR/deploy"
 
     if [ -z "$SERVICE" ]; then
-        docker compose -f docker-compose.production.yaml logs -f --tail=100
+        compose_cmd logs -f --tail=100
     else
-        docker compose -f docker-compose.production.yaml logs -f --tail=100 $SERVICE
+        compose_cmd logs -f --tail=100 "$SERVICE"
     fi
 }
 
@@ -230,21 +236,27 @@ logs() {
 status() {
     log "Service Status:"
 
-    cd $DEPLOY_DIR/deploy
-    docker compose -f docker-compose.production.yaml ps
+    cd "$DEPLOY_DIR/deploy"
+    compose_cmd ps
 
     echo ""
     log "Health Checks:"
 
-    # Check each service
-    services=("executor:8080" "strategy:8080" "api:8000" "web:3000")
-    for svc in "${services[@]}"; do
-        name=$(echo $svc | cut -d: -f1)
-        port=$(echo $svc | cut -d: -f2)
-        if docker exec aware-$name wget -q --spider http://localhost:$port/health 2>/dev/null; then
-            echo -e "  ${GREEN}✓${NC} $name"
+    # Check each service endpoint
+    services=("aware-executor" "aware-strategy" "aware-api" "aware-web")
+    for service in "${services[@]}"; do
+        case "$service" in
+            aware-executor) health_url="http://localhost:8080/api/polymarket/health" ;;
+            aware-strategy) health_url="http://localhost:8080/api/strategy/status" ;;
+            aware-api) health_url="http://localhost:8000/health" ;;
+            aware-web) health_url="http://localhost:3000/" ;;
+            *) health_url="http://localhost/health" ;;
+        esac
+
+        if docker exec "$service" wget -q --spider "$health_url" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} ${service#aware-}"
         else
-            echo -e "  ${RED}✗${NC} $name"
+            echo -e "  ${RED}✗${NC} ${service#aware-}"
         fi
     done
 }
@@ -255,8 +267,8 @@ status() {
 stop() {
     log "Stopping all services..."
 
-    cd $DEPLOY_DIR/deploy
-    docker compose -f docker-compose.production.yaml down
+    cd "$DEPLOY_DIR/deploy"
+    compose_cmd down
 
     log "✅ All services stopped"
 }

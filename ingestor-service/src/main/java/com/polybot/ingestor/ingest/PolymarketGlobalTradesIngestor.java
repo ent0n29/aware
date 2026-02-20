@@ -73,7 +73,7 @@ public class PolymarketGlobalTradesIngestor {
     log.info("  Topic: {}", AWARE_TOPIC);
     log.info("  Page size: {}", getPageSize());
     log.info("  Poll interval: {}s", getPollIntervalSeconds());
-    log.info("  Dedup capacity: {} trade IDs", DEFAULT_SEEN_KEYS_CAPACITY);
+    log.info("  Dedup capacity: {} trade keys", DEFAULT_SEEN_KEYS_CAPACITY);
     log.info("============================================================");
 
     // Optional backfill on start
@@ -188,11 +188,13 @@ public class PolymarketGlobalTradesIngestor {
         continue;
       }
 
-      // Use transactionHash as unique identifier (API doesn't return "id" field)
-      String tradeId = trade.path("transactionHash").asText(null);
-      if (tradeId == null || tradeId.isBlank()) {
+      String txHash = trade.path("transactionHash").asText(null);
+      if (txHash == null || txHash.isBlank()) {
         continue;
       }
+
+      // A single tx hash can include multiple distinct trades; use composite key.
+      String tradeId = buildTradeId(trade);
 
       // Deduplicate
       if (!seenTradeIds.add(tradeId)) {
@@ -212,7 +214,7 @@ public class PolymarketGlobalTradesIngestor {
         envelope.put("source", "aware-ingestor");
         envelope.put("type", EVENT_TYPE);
         envelope.put("key", tradeId);
-        envelope.put("data", buildTradeData(trade));
+        envelope.put("data", buildTradeData(tradeId, trade));
 
         String json = objectMapper.writeValueAsString(envelope);
         kafkaTemplate.send(AWARE_TOPIC, tradeId, json);
@@ -227,11 +229,29 @@ public class PolymarketGlobalTradesIngestor {
     return published;
   }
 
-  private Map<String, Object> buildTradeData(JsonNode trade) {
+  private String buildTradeId(JsonNode trade) {
+    String transactionHash = trade.path("transactionHash").asText("");
+    String asset = trade.path("asset").asText("");
+    int outcomeIndex = trade.path("outcomeIndex").asInt(0);
+    String side = trade.path("side").asText("");
+    String price = trade.path("price").asText("0");
+    String size = trade.path("size").asText("0");
+    long timestamp = trade.path("timestamp").asLong(0);
+
+    return String.join("|",
+        transactionHash,
+        asset,
+        Integer.toString(outcomeIndex),
+        side,
+        price,
+        size,
+        Long.toString(timestamp));
+  }
+
+  private Map<String, Object> buildTradeData(String tradeId, JsonNode trade) {
     Map<String, Object> data = new LinkedHashMap<>();
 
-    // Use transactionHash as id (API doesn't return "id" field)
-    data.put("id", trade.path("transactionHash").asText());
+    data.put("id", tradeId);
     data.put("pseudonym", trade.path("pseudonym").asText(null));
     data.put("proxyWallet", trade.path("proxyWallet").asText(null));
     data.put("maker", trade.path("maker").asText(null));

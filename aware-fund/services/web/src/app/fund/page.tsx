@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { Suspense, useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -101,7 +101,7 @@ const fundTypes = [
   { id: 'ALPHA-EDGE', name: 'ALPHA-EDGE', type: 'ACTIVE', description: 'ML edge predictions' },
 ]
 
-export default function FundPage() {
+function FundPageContent() {
   const searchParams = useSearchParams()
   const typeParam = searchParams.get('type') || 'PSI-10'
 
@@ -712,5 +712,18 @@ export default function FundPage() {
         </>
       )}
     </div>
+  )
+}
+
+export default function FundPage() {
+  return (
+    <Suspense fallback={
+      <div className="rounded-xl bg-slate-900/50 border border-slate-800 p-12 flex items-center justify-center">
+        <Loader2 className="h-8 w-8 text-aware-400 animate-spin" />
+        <span className="ml-3 text-slate-400">Loading fund details...</span>
+      </div>
+    }>
+      <FundPageContent />
+    </Suspense>
   )
 }

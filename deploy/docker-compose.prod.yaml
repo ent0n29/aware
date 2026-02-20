@@ -47,7 +47,7 @@ services:
     environment:
       CLICKHOUSE_DB: polybot
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 10s
@@ -75,7 +75,7 @@ services:
       SPRING_PROFILES_ACTIVE: production
       CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       POLYMARKET_API_KEY: ${POLYMARKET_API_KEY}
       POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET}
@@ -108,7 +108,7 @@ services:
       SPRING_PROFILES_ACTIVE: production
       CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       EXECUTOR_BASE_URL: http://executor:8080
       HFT_MODE: ${HFT_MODE:-PAPER}
@@ -138,7 +138,7 @@ services:
       SPRING_PROFILES_ACTIVE: production
       CLICKHOUSE_URL: jdbc:clickhouse://clickhouse:8123/polybot
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       JAVA_OPTS: "-Xmx1g -Xms512m"
     ports:
@@ -233,8 +233,8 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
-      - certbot_data:/var/www/certbot:ro
-      - letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -262,7 +262,7 @@ services:
       - prometheus
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
@@ -276,8 +276,6 @@ volumes:
   clickhouse_data:
   prometheus_data:
   grafana_data:
-  certbot_data:
-  letsencrypt:
 
 networks:
   default:

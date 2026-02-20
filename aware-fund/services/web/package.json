@@ -9,14 +9,14 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "14.0.4",
+    "clsx": "^2.0.0",
+    "lucide-react": "^0.303.0",
+    "next": "^15.5.10",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^2.10.3",
-    "lucide-react": "^0.303.0",
-    "clsx": "^2.0.0",
-    "tailwind-merge": "^2.2.0",
-    "swr": "^2.2.4"
+    "swr": "^2.2.4",
+    "tailwind-merge": "^2.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.6",
